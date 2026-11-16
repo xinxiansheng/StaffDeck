@@ -166,11 +166,14 @@ class LocalResourceCatalog:
         from app.agents.branching import get_agent
         from app.core.capability_manifest import general_skill_snapshot_digest, tool_snapshot_digest
         from app.db.models import GeneralSkill, KnowledgeBase, MCPServer, Skill, Tool
-        from staffdeck_harness.composition.projection import live_resource_ref
+        from staffdeck_harness.composition.projection import (
+            live_resource_ref,
+            mcp_server_for_tool_ref,
+        )
 
         model = {"tool": Tool, "mcp_server": MCPServer, "general_skill": GeneralSkill,
                  "knowledge_base": KnowledgeBase, "sop": Skill, "skill": Skill}.get(resource_type)
-        row = self.db.get(model, resource_id) if model else None
+        row = self.db.get(model, resource_id, populate_existing=True) if model else None
         if row is None or row.tenant_id != context.tenant_id:
             raise ModuleSdkError("资源不存在或不属于当前租户", code="RESOURCE_UNAVAILABLE")
         agent = get_agent(self.db, context.tenant_id, context.staff_id)
@@ -185,10 +188,7 @@ class LocalResourceCatalog:
             idem = config.get("idempotency") or {}
             related = ()
             if row.tool_type == "mcp" and row.mcp_server_id:
-                server = self.db.get(MCPServer, row.mcp_server_id)
-                if server is None or server.tenant_id != context.tenant_id:
-                    raise ModuleSdkError("MCP 服务不可用", code="RESOURCE_UNAVAILABLE")
-                related = (live_resource_ref(self.db, context.tenant_id, "mcp_server", server, agent=agent),)
+                related = (mcp_server_for_tool_ref(self.db, context.tenant_id, row, agent=agent),)
             return replace(descriptor, description=row.description or "",
                 input_schema=dict(row.input_schema or {}), digest=tool_snapshot_digest(self.db, row),
                 operation={"mcp": "mcp.invoke/v1", "a2a": "a2a.invoke/v1"}.get(row.tool_type, operation),

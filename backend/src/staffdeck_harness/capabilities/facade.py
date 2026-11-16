@@ -33,7 +33,7 @@ from app.core.harness_capability_invoker import (
     _workspace_root,
 )
 from app.core.harness_session_cleanup import harness_task_workspace_path
-from app.db.models import GeneralSkill, KnowledgeBase, MCPServer, ModelConfig, Tool
+from app.db.models import GeneralSkill, KnowledgeBase, ModelConfig, Tool
 from app.harness import (
     HarnessArtifactAccessError,
     HarnessExecutor,
@@ -182,7 +182,7 @@ class ToolFacade:
         db, ctx = self.d.db, inv.context
         args = dict(inv.arguments)
         tool_id = str(args.pop("tool_id", None) or inv.binding_id or "")
-        row = db.get(Tool, tool_id) if tool_id else None
+        row = db.get(Tool, tool_id, populate_existing=True) if tool_id else None
         if row is None or row.tenant_id != ctx.tenant_id or not row.enabled:
             return ModuleResult.fail("TOOL_NOT_AVAILABLE", "工具当前不可用。")
         if expected_digest and tool_snapshot_digest(db, row) != expected_digest:
@@ -191,9 +191,10 @@ class ToolFacade:
         op = {"http": "tool.invoke/v1", "mcp": "mcp.invoke/v1", "a2a": "a2a.invoke/v1"}.get(row.tool_type, "tool.invoke/v1")
         self.d.guard.require(self.d.security_context, op, ref)
         if row.tool_type == "mcp" and row.mcp_server_id:
-            server = db.get(MCPServer, row.mcp_server_id)
-            if server is not None:
-                self.d.guard.require(self.d.security_context, "mcp.invoke/v1", projection.live_resource_ref(db, ctx.tenant_id, "mcp_server", server, agent=self.d.agent_row))
+            server_ref = projection.mcp_server_for_tool_ref(
+                db, ctx.tenant_id, row, agent=self.d.agent_row,
+            )
+            self.d.guard.require(self.d.security_context, "mcp.invoke/v1", server_ref)
         remaining = self.d.remaining_seconds() if self.d.remaining_seconds else None
         result = ToolExecutor(db).execute(
             ctx.tenant_id,

@@ -13,6 +13,7 @@ The rules reproduced here are those of ``app.agents.branching``:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Iterable
 
 from sqlmodel import Session, select
@@ -40,6 +41,7 @@ from app.db.models import (
     Team,
     Tool,
 )
+from staffdeck_harness.contracts.errors import PermissionDenied
 from staffdeck_harness.contracts.security import ResourceRef
 
 _RESOURCE_MODEL: dict[str, type] = {
@@ -161,7 +163,7 @@ def binding_for(db: Session, tenant_id: str, agent_id: str | None, resource_type
             AgentResourceBinding.resource_type == _BINDING_TYPE.get(resource_type, resource_type),
             AgentResourceBinding.resource_id == resource_id,
             AgentResourceBinding.status != "deleted",
-        )
+        ).execution_options(populate_existing=True)
     ).first()
 
 
@@ -170,6 +172,43 @@ def live_resource_ref(db: Session, tenant_id: str, resource_type: str, resource:
 
     binding = binding_for(db, tenant_id, agent.id if agent is not None else None, resource_type, str(resource.id))
     return bound_resource_ref(db, tenant_id, resource_type, resource, agent=agent, binding=binding)
+
+
+def mcp_server_for_tool_ref(
+    db: Session, tenant_id: str, tool: Tool, *, agent: AgentProfile | None
+) -> ResourceRef:
+    """Authorize a transport dependency only through this agent's active tool binding.
+
+    This reference is used only while authorizing/executing the tool. Direct server
+    access still uses live_resource_ref and receives no inherited grant. An explicit
+    server binding, including a disabled/deleted one, always takes precedence.
+    """
+    server = db.get(MCPServer, tool.mcp_server_id, populate_existing=True)
+    if (
+        tool.tenant_id != tenant_id or tool.tool_type != "mcp" or not tool.enabled
+        or server is None or server.tenant_id != tenant_id or not server.enabled
+    ):
+        raise PermissionDenied("MCP 工具或关联服务不可用")
+    # Keep tombstones: a deliberately revoked server must not inherit tool authority.
+    binding = db.exec(select(AgentResourceBinding).where(
+        AgentResourceBinding.tenant_id == tenant_id,
+        AgentResourceBinding.agent_id == (agent.id if agent else ""),
+        AgentResourceBinding.resource_type == "mcp_server",
+        AgentResourceBinding.resource_id == server.id,
+    ).execution_options(populate_existing=True)).first()
+    ref = bound_resource_ref(db, tenant_id, "mcp_server", server, agent=agent, binding=binding)
+    if binding is not None or agent is None or agent.tenant_id != tenant_id:
+        return ref
+    tool_ref = live_resource_ref(db, tenant_id, "tool", tool, agent=agent)
+    attrs = tool_ref.attributes
+    if attrs["binding_status"] == "active" and (
+        attrs["private_to_agent"] or attrs["open_gallery"]
+    ):
+        return replace(ref, attributes={
+            **ref.attributes, "binding_status": "active", "private_to_agent": True,
+            "bound_via_tool_id": tool.id,
+        })
+    return ref
 
 
 def agent_bindings(db: Session, tenant_id: str, agent_id: str, resource_type: str | None = None) -> list[AgentResourceBinding]:

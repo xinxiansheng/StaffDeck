@@ -109,11 +109,15 @@ def test_provider_composition_projection_projects_agent(module, db):
     assert isinstance(staff.persona, str) and "Agent One" in staff.persona
     assert dict(staff.model_route) == {"default": "m1"}
     assert isinstance(staff.session_policy, SessionPolicy) and staff.session_policy.max_actions == 32
-    assert [(c.resource_type, c.resource_id, c.binding_id) for c in staff.capabilities] == [("knowledge_base", "kb1", "b_kb1")]
+    assert [(c.resource_type, c.resource_id, c.binding_id) for c in staff.capabilities] == [
+        ("knowledge_base", "kb1", "b_kb1"), ("tool", "lark_cli", None),
+    ]
     cap = staff.capabilities[0]
     assert cap.ref.tenant_id == "t1" and cap.ref.attributes["binding_status"] == "active" and cap.ref.attributes["private_to_agent"] is True
     assert staff.capability_ids("knowledge_base") == {"kb1"}
-    assert staff.visible_resource_ids() == {"knowledge_base": {"kb1"}, "skill": set()}
+    assert staff.visible_resource_ids() == {
+        "knowledge_base": {"kb1"}, "tool": {"lark_cli"}, "skill": set(),
+    }
     assert staff.sops == ()
     assert [(c.binding_id, c.channel, c.status) for c in staff.channels] == [("ch1", "feishu", "active")]
     assert staff.team is not None and staff.team.team_id == "team1" and staff.team.role == "member"
@@ -130,10 +134,13 @@ def test_provider_composition_projection_overall_and_missing_agent(module, db):
     provider = module(MODULE_ID).provider
     with pytest.raises(LookupError):
         provider.project(db, "t1", "nope")
-    # tenant without an overall agent: synthetic overall composition, nothing bound
+    # Synthetic overall has no explicit bindings; the existing built-in CLI remains.
     staff = provider.project(db, "t1", None)
     assert staff.is_overall is True and staff.staff_id == "t1:overall" and staff.name == "overall"
-    assert staff.capabilities == () and staff.sops == () and staff.channels == () and staff.team is None
+    assert [(c.resource_type, c.resource_id, c.binding_id) for c in staff.capabilities] == [
+        ("tool", "lark_cli", None),
+    ]
+    assert staff.sops == () and staff.channels == () and staff.team is None
     assert staff.ref.attributes == {"is_overall": True}
     assert dict(staff.model_route) == {"default": "m1"}
 
