@@ -26,6 +26,7 @@ from sqlmodel import Session
 from app.capabilities.local_general_skill import package_from_row
 from app.core.capability_manifest import general_skill_snapshot_digest, tool_snapshot_digest
 from app.core.harness_capability_invoker import (
+    _is_user_facing_workspace_file,
     _materialize_general_skill_package,
     _sandbox_path,
     _skill_package_preview,
@@ -281,7 +282,10 @@ class SandboxFacade:
 
     def discover_artifacts(self, task_frame_id: str) -> list[dict[str, Any]]:
         try:
-            discovered = publish_changed_harness_artifacts(self.workspace_root, task_frame_id, self._snapshot, operation="workspace_discovery")
+            discovered = publish_changed_harness_artifacts(
+                self.workspace_root, task_frame_id, self._snapshot,
+                operation="workspace_discovery", path_filter=_is_user_facing_workspace_file,
+            )
         except (HarnessArtifactAccessError, OSError):
             return []
         out: list[dict[str, Any]] = []

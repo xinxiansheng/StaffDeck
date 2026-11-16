@@ -267,3 +267,77 @@ def test_platform_private_turns_use_real_engine_and_deny_cross_owner_tools(
             client.get(f"/runs/{alice_run}/result", headers=_headers(token, "bob")).status_code
             == 404
         )
+
+
+def test_platform_run_model_and_hidden_context_reach_real_engine_only(db, fake_model, monkeypatch):
+    from sqlmodel import select
+
+    from app.db.models import Message, ModelConfig
+    from app.llm.model_protocols import model_config_fingerprint
+
+    model, base = fake_model
+    agent, service_owner = _seed(db, base)
+    service_owner.role = "admin"
+    default = db.get(ModelConfig, "model_1")
+    default.enabled = False  # A silently dropped override cannot pass this test.
+    selected = ModelConfig(
+        id="selected_model", tenant_id="tenant_demo", name="Selected", model="selected",
+        base_url=base, api_key_encrypted=default.api_key_encrypted, trust_status="verified",
+    )
+    db.add(default)
+    db.add(selected)
+    db.add(service_owner)
+    db.flush()
+    selected.verified_fingerprint = model_config_fingerprint(
+        api_protocol=selected.api_protocol, base_url=base, model="selected",
+        key_revision=selected.key_revision, protocol_options={}, security_revision=selected.security_revision,
+    )
+    token, prefix, digest = generate_api_key()
+    scopes = ["*", "platform:delegate"]
+    db.add(APIClient(id="platform", tenant_id="tenant_demo", name="Platform",
+                     created_by_user_id=service_owner.id, scopes_json=scopes,
+                     metadata_json={"platform_tenant_id": "platform_tenant"}))
+    db.add(APICredential(id="platform-key", tenant_id="tenant_demo", client_id="platform",
+                         name="Ephemeral", key_prefix=prefix, key_digest=digest, scopes_json=scopes))
+    db.commit()
+    engine = db.get_bind()
+    app = create_public_api_app()
+
+    def sessions():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = sessions
+    monkeypatch.setattr("app.public_api.jobs.enqueue_async_job", lambda *a, **k: "queued")
+    hidden = "ENGINE_ONLY_CONTEXT_9837:" + "x" * 2100
+    visible = "检查运行配置"
+    with TestClient(app) as client:
+        response = client.post("/agents/agent_1/runs", headers=_headers(token, "alice"), json={
+            "input": visible, "external_session_id": "af2-private-session",
+            "metadata": {"model_config_id": "selected_model", "platform_context": "  " + hidden + "  ",
+                         "customer_label": "keep_me"},
+        })
+        assert response.status_code == 202, response.text
+        run_id = response.json()["id"]
+        bind_actor(db, service_owner)
+        run_job(run_id, data_services=runtime_services(db))
+        db.expire_all()
+        job = db.get(APIJob, run_id)
+        assert job.status == "succeeded", job.error_json
+        assert model.requests
+        assert all(body["model"] == "selected" for body in model.requests)
+        text = json.dumps(model.requests, ensure_ascii=False)
+        assert hidden[:2000] in text
+        assert hidden[:2001] not in text
+        messages = db.exec(select(Message).where(Message.session_id == job.session_id, Message.role == "user")).all()
+        assert [message.content for message in messages] == [visible]
+        session = client.get(f"/agents/agent_1/sessions/{job.session_id}", headers=_headers(token, "alice"))
+        assert session.status_code == 200, session.text
+        assert session.json()["metadata"]["customer_label"] == "keep_me"
+        for path in (f"/agents/agent_1/sessions/{job.session_id}",
+                     f"/agents/agent_1/sessions/{job.session_id}/detail",
+                     f"/runs/{run_id}", f"/runs/{run_id}/result", f"/runs/{run_id}/events"):
+            result = client.get(path, headers=_headers(token, "alice"))
+            assert result.status_code == 200, result.text
+            assert "ENGINE_ONLY_CONTEXT_9837" not in result.text
+            assert "platform_context" not in result.text

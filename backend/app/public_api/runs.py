@@ -6,7 +6,7 @@ from typing import Any
 import threading
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 from starlette.background import BackgroundTask
@@ -81,6 +81,8 @@ _SENSITIVE_KEYS = {
     "headers",
     "raw_cot",
     "system_prompt",
+    "platform_context",
+    "context_injection",
     "tool_credentials",
 }
 
@@ -106,6 +108,31 @@ def _job_actor(db: Session, job: APIJob):
         raise PublicAPIError(403, "RUN_AUTHORIZATION_REVOKED", "Run authorization has been revoked.")
     ensure_public_agent(db, principal, str(job.agent_id))
     return principal
+
+
+_PLATFORM_RUN_OPTIONS = {"model_config_id", "platform_context"}
+
+
+def _platform_run_options(db: Session, principal: PublicPrincipal, metadata: dict) -> tuple[str | None, str | None]:
+    """Server-only options: validate at admission and again after durable recovery."""
+    if not _PLATFORM_RUN_OPTIONS.intersection(metadata):
+        return None, None
+    if principal.platform_subject is None:
+        raise PublicAPIError(403, "PLATFORM_DELEGATION_REQUIRED", "Runtime overrides require a trusted platform subject.")
+    model_id = metadata.get("model_config_id")
+    if "model_config_id" in metadata:
+        if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", model_id):
+            raise PublicAPIError(400, "PLATFORM_MODEL_INVALID", "Invalid runtime model identifier.")
+        from app.llm.model_config_resolver import resolve_model_config_for_runtime
+        try:
+            resolve_model_config_for_runtime(db, principal.tenant_id, model_id)
+        except HTTPException as exc:
+            raise PublicAPIError(exc.status_code, str(exc.detail), "The selected runtime model is unavailable.") from exc
+    context = metadata.get("platform_context")
+    if context is not None and not isinstance(context, str):
+        raise PublicAPIError(400, "PLATFORM_CONTEXT_INVALID", "Runtime context must be text.")
+    normalized_context = context.strip()[:2000] if context is not None else None
+    return model_id, normalized_context or None
 
 
 def _message_matches_run(message: Message, client_turn_id: str, turn_id: str | None) -> bool:
@@ -163,6 +190,8 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
     principal = _job_actor(db, job)
     actor = principal.actor_user
     payload = dict(job.request_json or {})
+    metadata = dict(payload.get("metadata") or {})
+    model_id, context = _platform_run_options(db, principal, metadata)
     session_id = str(payload.get("session_id") or "").strip() or None
     stateless = payload.get("session_mode") == "stateless"
     if not session_id:
@@ -174,7 +203,8 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
                 external_session_id=None if stateless else payload.get("external_session_id"),
                 external_user_id=payload.get("external_user_id"),
                 title=str(payload.get("input") or "")[:80],
-                metadata=dict(payload.get("metadata") or {}),
+                # Run-only options must not become public external-session metadata.
+                metadata={key: value for key, value in metadata.items() if key not in _PLATFORM_RUN_OPTIONS},
             ),
         )
         session_id = session.id
@@ -199,6 +229,8 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
         message=str(payload.get("input") or ""),
         attachments=attachments,
         channel="public_api",
+        model_config_id=model_id,
+        context_injection=context,
     )
     if principal.platform_subject is not None:
         metadata = payload.get("metadata") or {}
@@ -424,6 +456,7 @@ def create_run_route(
 ) -> dict:
     enforce_agent_access(principal, agent_id)
     ensure_public_agent(db, principal, agent_id)
+    _platform_run_options(db, principal, body.metadata)
     if body.session_id:
         owned_public_session(db, principal, agent_id, body.session_id)
     replay = replay_idempotent_response(db, principal, request, body.model_dump(mode="json"))
@@ -461,6 +494,7 @@ def create_run_stream_route(
     """Create a durable run and stream its public events in the same request."""
     enforce_agent_access(principal, agent_id)
     ensure_public_agent(db, principal, agent_id)
+    _platform_run_options(db, principal, body.metadata)
     if body.session_id:
         owned_public_session(db, principal, agent_id, body.session_id)
     request_payload = body.model_dump(mode="json")

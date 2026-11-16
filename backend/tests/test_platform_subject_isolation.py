@@ -600,3 +600,151 @@ def test_handoff_resume_cannot_gain_a_later_gateway_capability(platform):
         resumed._platform_tools = None
         limited = restrict_snapshot(db, snapshot, resumed, db.get(ChatSession, sid))
         assert [g.resource_id for g in limited.grants] == ["original"]
+
+
+def _ordinary_run_key(engine):
+    token, prefix, digest = generate_api_key()
+    with Session(engine) as db:
+        db.add(APIClient(id="ordinary_client", tenant_id="sd_tenant", name="Ordinary",
+                         created_by_user_id="service_owner", scopes_json=["*"]))
+        db.add(APICredential(id="ordinary_key", tenant_id="sd_tenant", client_id="ordinary_client",
+                            name="Test", key_prefix=prefix, key_digest=digest, scopes_json=["*"]))
+        db.commit()
+    return {"Authorization": "Bearer " + token}
+
+
+def _runtime_model(engine, **changes):
+    from app.db.models import ModelConfig
+    from app.llm.model_protocols import model_config_fingerprint
+
+    with Session(engine) as db:
+        model = ModelConfig(id="selected_model", tenant_id="sd_tenant", name="Selected",
+                            model="selected", api_key_encrypted="test-only", trust_status="verified")
+        db.add(model)
+        db.flush()
+        model.verified_fingerprint = model_config_fingerprint(
+            api_protocol=model.api_protocol, base_url=model.base_url, model=model.model,
+            key_revision=model.key_revision, protocol_options={},
+            security_revision=model.security_revision,
+        )
+        for key, value in changes.items():
+            setattr(model, key, value)
+        db.add(model)
+        db.commit()
+    return "selected_model"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("metadata", [{"model_config_id": "selected_model"}, {"platform_context": "hidden"}])
+def test_runtime_overrides_require_delegation_before_enqueuing(platform, monkeypatch, stream, metadata):
+    from sqlmodel import select
+    from starlette.responses import StreamingResponse
+
+    client, engine, _ = platform
+    auth = _ordinary_run_key(engine)
+    monkeypatch.setattr("app.public_api.runs.stream_job_events",
+                        lambda *a: StreamingResponse(iter(["event: done\n\n"])))
+    response = client.post("/agents/agent_test/runs" + (":stream" if stream else ""),
+                           headers=auth, json={"input": "test", "metadata": metadata})
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "PLATFORM_DELEGATION_REQUIRED"
+    with Session(engine) as db:
+        assert not db.exec(select(APIJob)).all()
+    # Existing ordinary API clients can still run without platform-only options.
+    assert client.post("/agents/agent_test/runs", headers=auth, json={"input": "normal"}).status_code == 202
+
+
+@pytest.mark.parametrize("metadata", [
+    {"model_config_id": "../model"}, {"model_config_id": "x" * 129},
+    {"model_config_id": 1}, {"model_config_id": ""},
+    {"platform_context": {"system": "hidden"}},
+])
+def test_runtime_override_malformed_values_are_not_silently_ignored(platform, metadata):
+    client, _, token = platform
+    response = client.post("/agents/agent_test/runs", headers=headers(token),
+                           json={"input": "test", "metadata": metadata})
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.parametrize("changes,status", [
+    ({"tenant_id": "another_tenant"}, 404), ({"enabled": False}, 409),
+    ({"trust_status": "unverified", "config_revision": 2}, 409),
+    ({"verified_fingerprint": "stale"}, 409),
+])
+def test_runtime_model_uses_existing_tenant_and_readiness_rules(platform, changes, status):
+    client, engine, token = platform
+    model_id = _runtime_model(engine, **changes)
+    response = client.post("/agents/agent_test/runs", headers=headers(token),
+                           json={"input": "test", "metadata": {"model_config_id": model_id}})
+    assert response.status_code == status, response.text
+
+
+def test_runtime_model_missing_is_rejected(platform):
+    client, _, token = platform
+    response = client.post("/agents/agent_test/runs", headers=headers(token),
+                           json={"input": "test", "metadata": {"model_config_id": "missing"}})
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize("change", ["disable_model", "revoke_delegation"])
+def test_queued_runtime_options_recheck_live_authorization(platform, monkeypatch, change):
+    from app.db.models import ModelConfig
+    from app.public_api.runs import execute_run
+    from app.public_api.errors import PublicAPIError
+
+    client, engine, token = platform
+    model_id = _runtime_model(engine)
+    response = client.post("/agents/agent_test/runs", headers=headers(token),
+                           json={"input": "test", "metadata": {"model_config_id": model_id,
+                                                                  "platform_context": "hidden"}})
+    assert response.status_code == 202, response.text
+    def unexpected(*a, **kw):
+        pytest.fail("An invalidated queued run reached the model")
+    monkeypatch.setattr("app.public_api.runs.AgentLoop", unexpected)
+    with Session(engine) as db:
+        row = db.get(ModelConfig, model_id) if change == "disable_model" else db.get(APIClient, "platform_client")
+        if change == "disable_model":
+            row.enabled = False
+        else:
+            row.scopes_json = ["*"]
+        db.add(row)
+        db.commit()
+    with Session(engine) as db:
+        with pytest.raises(PublicAPIError) as caught:
+            execute_run(db, db.get(APIJob, response.json()["id"]))
+        assert caught.value.status_code in (403, 409)
+
+
+def test_legacy_ordinary_job_cannot_gain_runtime_options_after_upgrade(platform, monkeypatch):
+    from app.public_api.runs import execute_run
+    from app.public_api.errors import PublicAPIError
+
+    client, engine, _ = platform
+    auth = _ordinary_run_key(engine)
+    response = client.post("/agents/agent_test/runs", headers=auth, json={"input": "old run"})
+    with Session(engine) as db:
+        job = db.get(APIJob, response.json()["id"])
+        job.request_json = {**job.request_json, "metadata": {"platform_context": "old untrusted option"}}
+        db.add(job)
+        db.commit()
+        with pytest.raises(PublicAPIError) as caught:
+            execute_run(db, job)
+        assert caught.value.code == "PLATFORM_DELEGATION_REQUIRED"
+
+
+@pytest.mark.parametrize("trust", ["verified", "legacy_trusted"])
+def test_delegated_stream_admission_preserves_model_compatibility(platform, monkeypatch, trust):
+    from starlette.responses import StreamingResponse
+
+    client, engine, token = platform
+    model_id = _runtime_model(engine, trust_status=trust)
+    monkeypatch.setattr("app.public_api.runs.stream_job_events",
+                        lambda *a: StreamingResponse(iter(["event: queued\n\n"])))
+    response = client.post("/agents/agent_test/runs:stream", headers=headers(token),
+                           json={"input": "test", "metadata": {"model_config_id": model_id,
+                                                                  "platform_context": "hidden"}})
+    assert response.status_code == 200, response.text
+    with Session(engine) as db:
+        job = db.get(APIJob, response.headers["X-Run-ID"])
+        assert job.request_json["metadata"]["model_config_id"] == model_id
+        assert job.request_json["_runtime_context"]["platform_subject"]["user_id"] == "alice"

@@ -372,3 +372,29 @@ def test_secure_open_rejects_file_and_parent_symlinks(
     with pytest.raises(HarnessArtifactAccessError):
         open_harness_artifact(workspace, "linked-directory/secret.txt")
     assert (external / "secret.txt").read_text(encoding="utf-8") == "outside"
+
+
+def test_v3_discovery_filters_process_paths_without_hiding_deliverable_scripts(tmp_path):
+    from staffdeck_harness.capabilities.facade import FacadeDeps, SandboxFacade
+    from staffdeck_harness.contracts.security import SecurityContext
+
+    workspace = tmp_path / "workspace"
+    facade = SandboxFacade(
+        FacadeDeps(db=None, guard=None, security_context=SecurityContext("user", "tenant")),
+        workspace_root=workspace, run_id="run", task_frame_id="frame",
+        sandbox_enabled=True, network_mode="deny", allowed_domains=(),
+    )
+    visible = {"report.md", "deliverables/result.csv", "deliverables/script.py"}
+    hidden = {
+        "attachments/source.pdf", ".harness/internal.json", "general_skill_demo/runner.py",
+        ".git/config", "work/.harness-trash/old.txt", "work/.pytest_cache/state",
+        "work/__pycache__/code.pyc", "work/node_modules/lib.js", "work/.tmp-build/note.md",
+        "work/temp.tmp", "work/partial.part", "work/code.pyc", "work/code.pyo",
+    }
+    for name in visible | hidden:
+        path = workspace / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic artifact " + name)
+    found = facade.discover_artifacts("frame")
+    assert {item["path"] for item in found} == visible
+    assert all(item["source"] == "harness_v3.workspace_discovery" for item in found)

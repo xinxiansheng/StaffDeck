@@ -27,3 +27,45 @@ An ordinary wildcard key cannot opt in. Ordinary members can manage only their o
 `backend/tests/test_platform_subject_isolation.py` uses real HTTP routes and SQLite, with synthetic principals. `backend/tests_harness/test_platform_isolation_engine.py` uses the real Node engine and MCP with a deterministic local model. It proves private memory recall, own workspace read/write and command execution, denial of other owners' files/native business access/network, and result ownership. Set `HARNESS_V3_ROOT` to a built engine; set `STAFFDECK_SRT_RUNTIME` to the repository's verified runtime bundle to require the positive command control. No real credentials or user data are needed.
 
 The integration also ran public API, memory, filesystem, command, sandbox, artifact, capability, turn ownership and handoff regression suites. Tests on other target OSes and the deployed platform gateway remain deployment checks.
+
+## Per-run options and artifact discovery
+
+`POST /api/v1/agents/{agent_id}/runs` and `runs:stream` accept
+`metadata.model_config_id` and `metadata.platform_context` only for a validated
+platform delegation subject. An ordinary API key (including a wildcard key)
+receives `403 PLATFORM_DELEGATION_REQUIRED` when it supplies either reserved
+field. Ordinary requests without these fields remain supported.
+
+Model IDs must match `[A-Za-z0-9_-]{1,128}`; malformed values produce
+`400 PLATFORM_MODEL_INVALID` instead of silently selecting the default. The
+existing runtime resolver checks tenant, enabled state and verification state,
+including its existing legacy compatibility rules. Both admission and durable
+execution validate the options; a queued run cannot retain a disabled model or
+revoked delegation. This does not add a model-permission system.
+
+The optional platform context must be text (`400 PLATFORM_CONTEXT_INVALID`
+otherwise). It is stripped, limited to 2000 characters and supplied through the
+existing `context_injection` field. It is not concatenated into the persisted
+user message or copied into external-session metadata. Named context fields
+are redacted from public trace payloads. Runtime options remain in the private
+durable job payload so queued execution can recover them. They do not override
+the frozen user, tenant, employee, Agent or capability ceiling.
+
+Workspace discovery now uses the same `_is_user_facing_workspace_file` filter
+as the existing capability invoker. It excludes internal/cache/temp paths and
+suffixes, while normal deliverables (including a user-facing `.py` file) remain
+publishable. It does not attempt to infer whether every arbitrary draft is a
+deliverable from its content or filename.
+
+## Platform container build
+
+`Dockerfile.platform` builds from this source tree with the reviewed SRT bundle
+and Bubblewrap; it does not apply external patches or overwrite installed Python
+modules. Build with `docker build -f Dockerfile.platform --target app -t
+staffdeck-platform:<commit> .`. The root `.dockerignore` excludes local secrets,
+databases, virtual environments and the host OS's prebuilt SRT directory.
+
+This recipe does not configure the deployment host's AppArmor/seccomp policies.
+Keep the existing non-root/no-new-privileges deployment boundary and validate
+command isolation on the actual target host. A successful build alone is not
+runtime isolation acceptance.
