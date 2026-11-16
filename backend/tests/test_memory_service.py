@@ -286,6 +286,8 @@ def test_clear_my_memories_scopes_to_current_user_and_agent() -> None:
         )
         db.add(Tenant(id="tenant_demo", name="Demo"))
         db.add(user)
+        db.add(AgentProfile(id="agent_a", tenant_id="tenant_demo", name="Agent A", status="active",
+                            metadata_json={"owner_user_id": "user_demo"}))
         db.add(ChatSession(id="session_agent_a", tenant_id="tenant_demo", user_id="user_demo", agent_id="agent_a"))
         db.add_all(
             [

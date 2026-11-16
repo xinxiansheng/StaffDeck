@@ -34,6 +34,7 @@ class PublicPrincipal:
     allowed_agent_ids: frozenset[str] | None = None
     manageable_agent_ids: frozenset[str] | None = None
     bootstrap_user: bool = False
+    platform_subject: dict | None = None
 
     def can(self, required: str) -> bool:
         if "*" in self.scopes or required in self.scopes:
@@ -58,7 +59,7 @@ def _credential_digest(token: str) -> str:
     ).hexdigest()
 
 
-def _api_key_principal(token: str, db: Session) -> PublicPrincipal:
+def _api_key_principal(token: str, db: Session, subject: dict | None = None) -> PublicPrincipal:
     prefix = token[:20]
     credential = db.exec(
         select(APICredential).where(APICredential.key_prefix == prefix)
@@ -67,12 +68,12 @@ def _api_key_principal(token: str, db: Session) -> PublicPrincipal:
         credential.key_digest, _credential_digest(token)
     ):
         raise PublicAPIError(401, "INVALID_API_KEY", "The API key is invalid.")
-    return principal_for_credential(db, credential.id)
+    return principal_for_credential(db, credential.id, subject=subject)
 
 
-def principal_for_credential(db: Session, credential_id: str) -> PublicPrincipal:
+def principal_for_credential(db: Session, credential_id: str, *, subject: dict | None = None) -> PublicPrincipal:
     """Revalidate the same stored grant for admission AND deferred execution."""
-    credential = db.get(APICredential, credential_id)
+    credential = db.get(APICredential, credential_id, populate_existing=True)
     if credential is None:
         raise PublicAPIError(401, "INVALID_API_KEY", "The API credential is unavailable.")
     now = utc_now()
@@ -80,10 +81,10 @@ def principal_for_credential(db: Session, credential_id: str) -> PublicPrincipal
         raise PublicAPIError(401, "API_KEY_REVOKED", "The API key has been revoked.")
     if credential.expires_at is not None and credential.expires_at <= now:
         raise PublicAPIError(401, "API_KEY_EXPIRED", "The API key has expired.")
-    client = db.get(APIClient, credential.client_id)
+    client = db.get(APIClient, credential.client_id, populate_existing=True)
     if not client or client.tenant_id != credential.tenant_id or client.status != "active":
         raise PublicAPIError(401, "API_CLIENT_INACTIVE", "The API client is inactive.")
-    actor = db.get(User, client.created_by_user_id or "")
+    actor = db.get(User, client.created_by_user_id or "", populate_existing=True)
     if not actor or actor.tenant_id != client.tenant_id:
         raise PublicAPIError(401, "API_CLIENT_OWNER_MISSING", "The API client owner is unavailable.")
     from app.public_api.runtime import bind_actor, check_client
@@ -113,7 +114,7 @@ def principal_for_credential(db: Session, credential_id: str) -> PublicPrincipal
     allowed_agent_ids, manageable_agent_ids = _agent_access_sets(
         db, client.tenant_id, actor
     )
-    return PublicPrincipal(
+    principal = PublicPrincipal(
         tenant_id=client.tenant_id,
         actor_user=actor,
         scopes=frozenset(effective),
@@ -124,6 +125,8 @@ def principal_for_credential(db: Session, credential_id: str) -> PublicPrincipal
         manageable_agent_ids=manageable_agent_ids,
     )
 
+    from app.public_api.platform_subject import bind_platform_subject
+    return bind_platform_subject(db, principal, client, credential, subject)
 
 def _agent_access_sets(
     db: Session,
@@ -192,7 +195,8 @@ def get_public_principal(
     token = credentials.credentials
     if not token.startswith(PUBLIC_KEY_PREFIX):
         raise PublicAPIError(401, "API_KEY_REQUIRED", "A StaffDeck sd_* API key is required.")
-    principal = _api_key_principal(token, db)
+    from app.public_api.platform_subject import decode_subject, HEADER
+    principal = _api_key_principal(token, db, decode_subject(request.headers.get(HEADER)))
     request.state.public_principal = principal
     return principal
 
@@ -206,7 +210,8 @@ def get_public_or_admin_principal(
         raise PublicAPIError(401, "NOT_AUTHENTICATED", "A Bearer token is required.")
     token = credentials.credentials
     if token.startswith(PUBLIC_KEY_PREFIX):
-        principal = _api_key_principal(token, db)
+        from app.public_api.platform_subject import decode_subject, HEADER
+        principal = _api_key_principal(token, db, decode_subject(request.headers.get(HEADER)))
         request.state.public_principal = principal
         return principal
     try:

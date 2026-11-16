@@ -48,15 +48,6 @@ def diagnostics() -> SandboxDiagnostics:
             "请修复安装或重新安装 StaffDeck。",
         )
     report = _environment_diagnostics(backend)
-    if sys.platform == "win32" and report.status == "unavailable":
-        return SandboxDiagnostics(
-            "degraded",
-            "SANDBOX_UNSANDBOXED_FALLBACK",
-            "安全沙盒不可用，当前已自动降级为无沙盒执行。",
-            "高风险部署：执行可以访问 StaffDeck 进程权限范围内的主机资源。"
-            "生产环境请配置已签名的 Windows SRT，或将 StaffDeck 放入隔离容器/专用虚拟机。",
-            backend="unsandboxed",
-        )
     return report
 
 

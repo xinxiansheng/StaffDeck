@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db.models import APIIdempotencyRecord, utc_now
 from app.public_api.auth import PublicPrincipal
 from app.public_api.errors import PublicAPIError
+from app.public_api.platform_subject import scoped_key
 
 
 def request_fingerprint(payload: Any) -> str:
@@ -38,6 +39,7 @@ def replay_idempotent_response(
         raise PublicAPIError(400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is too long.")
     if not principal.credential_id:
         return None
+    key = scoped_key(principal, key)
     row = db.exec(
         select(APIIdempotencyRecord).where(
             APIIdempotencyRecord.credential_id == principal.credential_id,
@@ -74,6 +76,7 @@ def store_idempotent_response(
     key = str(request.headers.get("Idempotency-Key") or "").strip()
     if not key or not principal.credential_id:
         return
+    key = scoped_key(principal, key)
     row = APIIdempotencyRecord(
         tenant_id=principal.tenant_id,
         credential_id=principal.credential_id,

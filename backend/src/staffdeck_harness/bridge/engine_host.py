@@ -233,6 +233,8 @@ class HarnessV3Engine(TurnCoordinator):
             from dataclasses import replace
             self.snapshot = replace(self.snapshot, session_policy={**self.snapshot.session_policy, "read_only": True},
                                     grants=tuple(g for g in self.snapshot.grants if g.operation == "general_skill.consume/v1"))
+        from staffdeck_harness.capabilities.platform_isolation import restrict_snapshot
+        self.snapshot = restrict_snapshot(self.db, self.snapshot, request, session)
         self.guard = Guard("staffdeck.runtime", self.profile)
         from staffdeck_harness.capabilities.manifest import SnapshotManifestBuilder
         from staffdeck_harness.composition.sources import resolve_source

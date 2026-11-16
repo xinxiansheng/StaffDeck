@@ -154,6 +154,8 @@ class _Workspace:
         allow_root: bool = False,
     ) -> Path:
         candidate = _normalize_access_path(raw_path, root=self.root, allow_root=allow_root)
+        if self.context.sandbox_enabled and not candidate.is_relative_to(self.root):
+            raise HarnessExecutionError("PATH_OUTSIDE_WORKSPACE", "File access is limited to this task workspace.")
         if _TRASH_DIRECTORY in candidate.parts:
             raise HarnessExecutionError(
                 "RESERVED_PATH",

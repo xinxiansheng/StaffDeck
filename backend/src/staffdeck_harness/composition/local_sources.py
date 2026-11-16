@@ -147,7 +147,11 @@ class LocalIdentitySource:
         if context.user_id and (user is None or user.tenant_id != context.tenant_id):
             raise PermissionDenied("request identity unavailable")
         if user is not None:
-            return identity.from_user(user, channel=context.channel)
+            security = identity.from_user(user, channel=context.channel)
+            if user.source == "platform":
+                from app.public_api.platform_subject import delegated_security_context
+                return delegated_security_context(self.db, context, security, user)
+            return security
         return identity.from_service(f"channel:{context.channel}", context.tenant_id)
 
 

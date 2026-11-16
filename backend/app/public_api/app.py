@@ -17,7 +17,7 @@ from app.public_api.errors import (
     public_validation_error_handler,
 )
 from app.public_api.utils import audit_request
-from app.public_api import identity
+from app.public_api import identity, private_content
 
 
 def create_public_api_app() -> FastAPI:
@@ -66,6 +66,7 @@ def create_public_api_app() -> FastAPI:
     app.include_router(gallery.router)
     app.include_router(agents.router)
     app.include_router(sessions.router)
+    app.include_router(private_content.router)
     app.include_router(runs.router)
     app.include_router(jobs.router)
     app.include_router(sops.router)

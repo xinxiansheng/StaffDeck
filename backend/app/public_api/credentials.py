@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
 from app.db import get_session
-from app.db.models import APIClient, APICredential, AgentProfile, utc_now
+from app.db.models import APIClient, APICredential, utc_now
 from app.public_api.auth import (
     PublicPrincipal,
     generate_api_key,
@@ -12,6 +12,7 @@ from app.public_api.auth import (
 )
 from app.public_api.credential_profiles import AGENT_KEY_ALLOWED_SCOPES
 from app.public_api.errors import PublicAPIError
+from app.security.permissions import is_admin_user
 from app.public_api.schemas import (
     APIClientCreate,
     APIClientRead,
@@ -37,6 +38,22 @@ def _require_credentials_write(principal: PublicPrincipal) -> None:
         raise PublicAPIError(403, "INSUFFICIENT_SCOPE", "credentials:write is required.")
     if not principal.bootstrap_user and principal.agent_id:
         raise PublicAPIError(403, "TENANT_KEY_REQUIRED", "A tenant management key is required.")
+
+
+def _require_delegation_admin(principal, scopes, metadata):
+    if ("platform:delegate" in (scopes or []) or "platform_tenant_id" in (metadata or {})):
+        if not is_admin_user(principal.actor_user) or principal.platform_subject:
+            raise PublicAPIError(403, "DELEGATION_ADMIN_REQUIRED", "Only the deployment administrator may configure platform delegation.")
+
+
+def _client_access(db, principal, client_id):
+    client = db.get(APIClient, client_id)
+    if not client or client.tenant_id != principal.tenant_id:
+        raise PublicAPIError(404, "API_CLIENT_NOT_FOUND", "API client not found.")
+    if not is_admin_user(principal.actor_user) and client.created_by_user_id != principal.actor_user.id:
+        raise PublicAPIError(403, "API_CLIENT_FORBIDDEN", "This API client belongs to another user.")
+    _require_delegation_admin(principal, client.scopes_json, client.metadata_json)
+    return client
 
 
 def _client_read(row: APIClient) -> APIClientRead:
@@ -79,7 +96,8 @@ def list_api_clients(
         .where(APIClient.tenant_id == principal.tenant_id)
         .order_by(APIClient.created_at.desc())
     ).all()
-    return [_client_read(row) for row in rows]
+    return [_client_read(row) for row in rows if is_admin_user(principal.actor_user)
+            or row.created_by_user_id == principal.actor_user.id]
 
 
 @router.post("/api-clients", response_model=APIClientRead, status_code=201)
@@ -89,6 +107,7 @@ def create_api_client(
     db: Session = Depends(get_session),
 ) -> APIClientRead:
     _require_credentials_write(principal)
+    _require_delegation_admin(principal, request.scopes, request.metadata)
     existing = db.exec(
         select(APIClient).where(
             APIClient.tenant_id == principal.tenant_id,
@@ -121,9 +140,8 @@ def update_api_client(
     db: Session = Depends(get_session),
 ) -> APIClientRead:
     _require_credentials_write(principal)
-    row = db.get(APIClient, client_id)
-    if not row or row.tenant_id != principal.tenant_id:
-        raise PublicAPIError(404, "API_CLIENT_NOT_FOUND", "API client not found.")
+    row = _client_access(db, principal, client_id)
+    _require_delegation_admin(principal, request.scopes, request.metadata)
     values = request.model_dump(exclude_unset=True)
     if "name" in values:
         row.name = str(values["name"]).strip()
@@ -153,9 +171,7 @@ def list_api_credentials(
     db: Session = Depends(get_session),
 ) -> list[APICredentialRead]:
     _require_credentials_write(principal)
-    client = db.get(APIClient, client_id)
-    if not client or client.tenant_id != principal.tenant_id:
-        raise PublicAPIError(404, "API_CLIENT_NOT_FOUND", "API client not found.")
+    _client_access(db, principal, client_id)
     rows = db.exec(
         select(APICredential)
         .where(APICredential.client_id == client_id)
@@ -176,9 +192,8 @@ def create_api_credential(
     db: Session = Depends(get_session),
 ) -> APICredentialCreated:
     _require_credentials_write(principal)
-    client = db.get(APIClient, client_id)
-    if not client or client.tenant_id != principal.tenant_id:
-        raise PublicAPIError(404, "API_CLIENT_NOT_FOUND", "API client not found.")
+    client = _client_access(db, principal, client_id)
+    _require_delegation_admin(principal, request.scopes, client.metadata_json)
     scopes = set(request.scopes)
     client_scopes = set(client.scopes_json or [])
     if not all(_scope_allowed(client_scopes, scope) for scope in scopes):
@@ -222,6 +237,7 @@ def rotate_api_credential(
     row = db.get(APICredential, credential_id)
     if not row or row.tenant_id != principal.tenant_id:
         raise PublicAPIError(404, "API_CREDENTIAL_NOT_FOUND", "API credential not found.")
+    _client_access(db, principal, row.client_id)
     token, prefix, digest = generate_api_key()
     row.key_prefix = prefix
     row.key_digest = digest
@@ -244,6 +260,7 @@ def revoke_api_credential(
     row = db.get(APICredential, credential_id)
     if not row or row.tenant_id != principal.tenant_id:
         raise PublicAPIError(404, "API_CREDENTIAL_NOT_FOUND", "API credential not found.")
+    _client_access(db, principal, row.client_id)
     row.status = "revoked"
     row.revoked_at = utc_now()
     row.updated_at = utc_now()

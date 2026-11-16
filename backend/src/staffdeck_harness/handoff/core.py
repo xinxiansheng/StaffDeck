@@ -187,6 +187,10 @@ class HandoffCore:
             return local()  # compatibility adapter for built-in legacy service objects
 
     def propose(self, row: HumanHandoffRequest, agent: StaffProfile | None = None) -> str | None:
+        from app.public_api.platform_subject import platform_handoff_owner
+        owner = platform_handoff_owner(self.db, row)
+        if owner:
+            return owner
         if self.assignment is None:
             return None
         return self.call_module(self.assignment, "handoff.assign/v1", row.tenant_id,
@@ -242,9 +246,13 @@ class HandoffCore:
     def assign(self, ctx: SecurityContext, row: HumanHandoffRequest, *, assignee_user_id: str | None = None, actor_is_system: bool = False) -> HumanHandoffRequest:
         if not actor_is_system:
             self.guard.require(ctx, "handoff.assign/v1", self._ref(row))
-        candidate = assignee_user_id or self.propose(row)
+        from app.public_api.platform_subject import platform_handoff_owner
+        owner = platform_handoff_owner(self.db, row)
+        if owner and assignee_user_id and owner != assignee_user_id:
+            raise HandoffTransitionError("A platform handoff cannot be reassigned away from its initiator")
+        candidate = owner or assignee_user_id or self.propose(row)
         if candidate:
-            user = internal_user(self.db, row.tenant_id, candidate, profile=self.guard.profile)
+            user = self.db.get(User, owner) if owner else internal_user(self.db, row.tenant_id, candidate, profile=self.guard.profile)
             if user is None:
                 raise HandoffTransitionError(f"assignee {candidate} is not a member of tenant {row.tenant_id}")
             row.assignee_user_id = candidate
@@ -264,6 +272,9 @@ class HandoffCore:
         identity = ctx or self.guard.profile.identity.from_service("notifications", row.tenant_id)
         self.guard.require(identity, "handoff.notify/v1", self._ref(row))
         preferred = str((row.metadata_json or {}).get("assignee_notify_channel") or "").strip()
+        from app.public_api.platform_subject import platform_handoff_owner
+        if platform_handoff_owner(self.db, row):
+            preferred = "web"
         if not preferred:
             session = self.db.get(ChatSession, row.session_id)
             preferred = session.channel if session else "web"

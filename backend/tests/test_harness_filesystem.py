@@ -206,6 +206,8 @@ def test_harness_internal_trash_remains_reserved(tmp_path: Path) -> None:
 
 def test_typed_file_tools_accept_absolute_and_parent_paths(tmp_path: Path) -> None:
     executor, context = _harness(tmp_path)
+    from dataclasses import replace
+    context = replace(context, sandbox_enabled=False)
     context.workspace_root.mkdir(parents=True)
     outside = tmp_path / "outside.txt"
 
@@ -277,6 +279,8 @@ def test_typed_file_tools_accept_absolute_and_parent_paths(tmp_path: Path) -> No
 
 def test_external_file_can_be_staged_as_downloadable_artifact(tmp_path: Path) -> None:
     executor, context = _harness(tmp_path)
+    from dataclasses import replace
+    context = replace(context, sandbox_enabled=False)
     external = tmp_path / "outside-report.txt"
     external.write_text("ready", encoding="utf-8")
 
@@ -670,3 +674,16 @@ def _execute_failure(
     assert result.success is False
     assert result.error is not None
     return result.error.code
+
+
+@pytest.mark.parametrize("tool", ["read_file", "publish_artifact", "file_info", "delete_file"])
+@pytest.mark.parametrize("absolute", [False, True])
+def test_isolated_file_tools_never_read_publish_or_delete_another_workspace(tmp_path, tool, absolute):
+    executor, context = _harness(tmp_path)
+    external = tmp_path / "private.txt"
+    external.write_text("ANOTHER_USER_SECRET")
+    result = executor.execute(context, HarnessToolCall(call_id="cross-owner", name=tool,
+        arguments={"path": str(external) if absolute else "../private.txt"}))
+    assert not result.success
+    assert "ANOTHER_USER_SECRET" not in str(result)
+    assert external.read_text() == "ANOTHER_USER_SECRET"

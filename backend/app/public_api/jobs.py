@@ -92,7 +92,7 @@ def create_job(
         credential_id=principal.credential_id,
         agent_id=agent_id,
         kind=kind,
-        request_json=_job_payload(db, request_payload, principal.actor_user.id),
+        request_json=_job_payload(db, request_payload, principal.actor_user.id, principal.platform_subject),
     )
     db.add(row)
     db.flush()
@@ -139,11 +139,12 @@ def create_internal_job(
     return row
 
 
-def _job_payload(db, payload, actor_id=None):
+def _job_payload(db, payload, actor_id=None, platform_subject=None):
     from staffdeck_harness.runtime.session_binding import current_binding
     subject = db.info.get("staffdeck_control_subject")
     return {**payload, "_runtime_context": {"binding": current_binding(db),
-        "actor_id": actor_id or (subject.user_id if subject else None)}}
+        "actor_id": actor_id or (subject.user_id if subject else None),
+        **({"platform_subject": platform_subject} if platform_subject else {})}}
 
 
 def emit_job_event(
@@ -441,8 +442,8 @@ def run_job(job_id: str, *, data_services=None) -> None:
                     raise PublicAPIError(403, "JOB_ACTOR_UNAVAILABLE", "The internal job actor is unavailable.")
                 bind_actor(db, actor)
             if job.credential_id != "internal":
-                from app.public_api.auth import principal_for_credential
-                principal = principal_for_credential(db, job.credential_id)
+                from app.public_api.platform_subject import principal_for_job
+                principal = principal_for_job(db, job)
                 if principal.tenant_id != job.tenant_id:
                     raise PublicAPIError(403, "JOB_TENANT_MISMATCH", "Job identity changed")
                 if job.kind == "run" and not principal.can("runs:create"):
@@ -512,7 +513,8 @@ def ensure_not_cancelled(db: Session, job: APIJob) -> None:
 
 def _owned_job(db: Session, principal: PublicPrincipal, job_id: str) -> APIJob:
     row = db.get(APIJob, job_id)
-    if not row or row.tenant_id != principal.tenant_id:
+    from app.public_api.platform_subject import owns_job
+    if not row or not owns_job(db, principal, row):
         raise PublicAPIError(404, "JOB_NOT_FOUND", "Job not found.")
     if principal.agent_id and row.agent_id != principal.agent_id:
         raise PublicAPIError(404, "JOB_NOT_FOUND", "Job not found.")
@@ -606,6 +608,14 @@ def stream_job_events(
             with data_services.session(None, purpose="api-job-events") as event_db:
                 current = event_db.get(APIJob, row.id)
                 if not current:
+                    return
+                from app.public_api.auth import principal_for_credential
+                try:
+                    live = principal_for_credential(event_db, principal.credential_id,
+                                                     subject=principal.platform_subject)
+                    _owned_job(event_db, live, row.id)
+                    _require_job_scope(live, current, "read")
+                except PublicAPIError:
                     return
                 rows = event_db.exec(
                     select(APIJobEvent)

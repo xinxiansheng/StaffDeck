@@ -132,9 +132,15 @@ class HumanHandoffService:
                                     "step_assignee_user_id": step_assignee_user_id,
                                     "binding_default_assignee_user_id": binding_default_assignee_user_id}
             selected = core.propose(handoff)
-            if selected and not self._is_internal_assignee(tenant_id, selected):
+            from app.public_api.platform_subject import platform_handoff_owner
+            if selected and selected != platform_handoff_owner(self.db, handoff) and not self._is_internal_assignee(tenant_id, selected):
                 raise ValueError("assignment module proposed an invalid tenant user")
             handoff.assignee_user_id = selected
+        from app.public_api.platform_subject import platform_handoff_owner
+        platform_owner = platform_handoff_owner(self.db, handoff)
+        if platform_owner:
+            handoff.assignee_user_id = platform_owner
+            handoff.metadata_json = {**handoff.metadata_json, "assignee_notify_channel": "web"}
         self.db.add(handoff)
         chat_session.status = "handoff"
         chat_session.awaiting_input_json = {

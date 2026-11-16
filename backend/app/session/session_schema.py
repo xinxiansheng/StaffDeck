@@ -217,6 +217,7 @@ class ChatTurnRequest(BaseModel):
     _trusted_execution: Any = PrivateAttr(default=None)
     _runtime_namespace: str = PrivateAttr(default="oss-local")
     _read_only: bool = PrivateAttr(default=False)
+    _platform_tools: list[str] | None = PrivateAttr(default=None)
     tenant_id: str
     session_id: Optional[str] = None
     agent_id: Optional[str] = None

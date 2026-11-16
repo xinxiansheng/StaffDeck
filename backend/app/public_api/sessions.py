@@ -7,6 +7,7 @@ from app.db import get_session
 from app.db.models import AgentProfile, ChatSession, ExternalSessionBinding, utc_now
 from app.public_api.auth import PublicPrincipal, enforce_agent_access, require_scopes
 from app.public_api.errors import PublicAPIError
+from app.public_api.platform_subject import scoped_key
 from app.public_api.idempotency import replay_idempotent_response, store_idempotent_response
 from app.public_api.schemas import PublicSessionCreate, PublicSessionUpdate
 from app.public_api.utils import etag_for
@@ -19,7 +20,7 @@ def _session_payload(row: ChatSession, binding: ExternalSessionBinding | None = 
     return {
         "id": row.id,
         "agent_id": row.agent_id,
-        "external_session_id": binding.external_session_id if binding else None,
+        "external_session_id": (binding.metadata_json or {}).get("_platform_external_id", binding.external_session_id) if binding else None,
         "external_user_id": binding.external_user_id if binding else None,
         "title": row.title,
         "status": row.status,
@@ -67,6 +68,8 @@ def owned_public_session(
         or row.tenant_id != principal.tenant_id
         or row.agent_id != agent_id
         or row.user_id != principal.actor_user.id
+        or principal.platform_subject is not None and
+           (row.channel_target_json or {}).get("_platform_subject") != principal.platform_subject
     ):
         raise PublicAPIError(404, "SESSION_NOT_FOUND", "Session not found.")
     binding = None
@@ -94,7 +97,7 @@ def create_public_session_row(
         existing = db.exec(
             select(ExternalSessionBinding).where(
                 ExternalSessionBinding.credential_id == principal.credential_id,
-                ExternalSessionBinding.external_session_id == body.external_session_id,
+                ExternalSessionBinding.external_session_id == scoped_key(principal, body.external_session_id),
             )
         ).first()
         if existing:
@@ -106,6 +109,7 @@ def create_public_session_row(
                 )
             row = db.get(ChatSession, existing.session_id)
             if row:
+                owned_public_session(db, principal, agent_id, row.id)
                 return row, existing
     from app.db.models import new_id
 
@@ -116,6 +120,7 @@ def create_public_session_row(
         agent_id=agent_id,
         title=(body.title or "新会话").strip()[:200],
         channel="public_api",
+        channel_target_json={"_platform_subject": principal.platform_subject, "_platform_credential": principal.credential_id} if principal.platform_subject else None,
     )
     from staffdeck_harness.runtime.session_binding import bind_session
     bind_session(db, row, created=True)
@@ -127,10 +132,11 @@ def create_public_session_row(
             tenant_id=principal.tenant_id,
             credential_id=principal.credential_id,
             agent_id=agent_id,
-            external_session_id=body.external_session_id,
+            external_session_id=scoped_key(principal, body.external_session_id),
             external_user_id=body.external_user_id,
             session_id=row.id,
-            metadata_json=body.metadata,
+            metadata_json={**body.metadata, **({"_platform_external_id": body.external_session_id}
+                           if principal.platform_subject else {})},
         )
         db.add(binding)
     db.commit()

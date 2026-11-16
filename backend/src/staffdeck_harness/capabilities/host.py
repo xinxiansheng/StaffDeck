@@ -332,6 +332,8 @@ class CapabilityHost:
                 return ModuleResult.fail(exc.code, exc.message), None
 
     def _invoke(self, inv: ModuleInvocation) -> tuple[ModuleResult, Receipt | None]:
+        from staffdeck_harness.capabilities.platform_isolation import require_invocation
+        require_invocation(self.db, self.slot.snapshot, inv)
         if self.slot.snapshot.session_policy.get("read_only"):
             readable = inv.operation == "general_skill.consume/v1" or (
                 inv.operation == "sandbox.execute/v1" and inv.arguments.get("tool") in
@@ -647,6 +649,8 @@ class CapabilityHost:
 
     def authorize_http_task(self, inv: ModuleInvocation):
         """Public revalidation port for a deferred task; never executes the HTTP request."""
+        from staffdeck_harness.capabilities.platform_isolation import require_invocation
+        require_invocation(self.db, self.slot.snapshot, inv)
         self._fence_resource(inv)
         self._pep(inv)
         result = self._dispatch(inv, definition_only=True)

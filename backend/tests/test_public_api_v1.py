@@ -255,7 +255,6 @@ def test_streaming_run_endpoint_emits_reply_deltas(monkeypatch) -> None:
             yield {"event": "complete", "data": response.model_dump(mode="json")}
 
     monkeypatch.setattr("app.public_api.jobs.engine", engine)
-    monkeypatch.setattr("app.public_api.runs.engine", engine)
     monkeypatch.setattr("app.public_api.runs.AgentLoop", FakeStreamingLoop)
     monkeypatch.setattr(
         "app.public_api.jobs.enqueue_async_job",
@@ -711,7 +710,6 @@ def test_run_handler_relays_live_public_trace_and_returns_citations(monkeypatch)
             self.db.commit()
             yield {"event": "complete", "data": response.model_dump(mode="json")}
 
-    monkeypatch.setattr("app.public_api.runs.engine", engine)
     monkeypatch.setattr("app.public_api.runs.AgentLoop", FakeLoop)
     with Session(engine) as db:
         job = db.get(APIJob, "apijob_live_trace")

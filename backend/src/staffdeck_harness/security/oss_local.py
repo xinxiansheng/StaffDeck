@@ -104,6 +104,8 @@ class LocalPep(PepPort):
         return Decision.allow("tenant member", source="OSS_LOCAL")
 
     def _authorize_agent(self, ctx: SecurityContext, action: str, resource: ResourceRef) -> Decision:
+        if action in _USE_ACTIONS and ctx.attributes.get("platform_agent_id") == resource.id:
+            return Decision.allow("verified platform delegation", source="OSS_LOCAL")
         if action in _USE_ACTIONS and _attr(resource, "channel_bound_agent") is True:
             return Decision.allow("use through the configured channel binding", source="OSS_LOCAL")
         owner = _attr(resource, "owner_user_id")

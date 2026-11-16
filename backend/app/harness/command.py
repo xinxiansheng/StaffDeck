@@ -156,14 +156,9 @@ def exec_command(
         else:
             backend = "bubblewrap"
     if backend is None:
-        backend = "unsandboxed" if sys.platform == "win32" else require_backend()
+        backend = require_backend()
     elif backend == "srt":
-        try:
-            ensure_backend_usable(backend)
-        except HarnessExecutionError:
-            if sys.platform != "win32":
-                raise
-            backend = "unsandboxed"
+        ensure_backend_usable(backend)
     else:
         ensure_backend_usable(backend)
     command = _command_for_sandbox_workspace(command, backend)
@@ -329,14 +324,9 @@ def run_sandboxed_process(
         else:
             backend = "bubblewrap"
     if backend is None:
-        backend = "unsandboxed" if sys.platform == "win32" else require_backend()
+        backend = require_backend()
     elif backend == "srt":
-        try:
-            ensure_backend_usable(backend)
-        except HarnessExecutionError:
-            if sys.platform != "win32":
-                raise
-            backend = "unsandboxed"
+        ensure_backend_usable(backend)
     if backend == "unsandboxed":
         process_argv = [str(item) for item in argv]
         process_env = dict(env or {})

@@ -14,10 +14,8 @@ from starlette.background import BackgroundTask
 from app.core import AgentLoop
 from app.core.cancellation import cancel_chat_turn
 from app.core.harness_session_cleanup import harness_task_workspace_path
-from app.db import engine, get_session
+from app.db import get_session
 from app.db.models import (
-    APIClient,
-    APICredential,
     APIJob,
     AgentEvent,
     HarnessInvocationRecord,
@@ -102,24 +100,12 @@ def _redact(value: Any) -> Any:
 
 
 def _job_actor(db: Session, job: APIJob):
-    from app.public_api.auth import principal_for_credential
-    principal = principal_for_credential(db, job.credential_id)
-    if principal.tenant_id != job.tenant_id or not principal.can("runs:create"):
+    from app.public_api.platform_subject import principal_for_job
+    principal = principal_for_job(db, job)
+    if not principal.can("runs:create"):
         raise PublicAPIError(403, "RUN_AUTHORIZATION_REVOKED", "Run authorization has been revoked.")
-    if job.agent_id:
-        ensure_public_agent(db, principal, job.agent_id)
-    credential = db.get(APICredential, job.credential_id)
-    if not credential or credential.tenant_id != job.tenant_id:
-        raise RuntimeError("Run credential is unavailable")
-    client = db.get(APIClient, credential.client_id)
-    if not client or not client.created_by_user_id:
-        raise RuntimeError("Run API client is unavailable")
-    from app.db.models import User
-
-    actor = db.get(User, client.created_by_user_id)
-    if not actor or actor.tenant_id != job.tenant_id:
-        raise RuntimeError("Run API client owner is unavailable")
-    return credential, actor
+    ensure_public_agent(db, principal, str(job.agent_id))
+    return principal
 
 
 def _message_matches_run(message: Message, client_turn_id: str, turn_id: str | None) -> bool:
@@ -174,19 +160,12 @@ def _run_artifacts(db: Session, job: APIJob) -> list[dict[str, Any]]:
 
 @register_job_handler("run")
 def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
-    credential, actor = _job_actor(db, job)
+    principal = _job_actor(db, job)
+    actor = principal.actor_user
     payload = dict(job.request_json or {})
     session_id = str(payload.get("session_id") or "").strip() or None
     stateless = payload.get("session_mode") == "stateless"
     if not session_id:
-        principal = PublicPrincipal(
-            tenant_id=job.tenant_id,
-            actor_user=actor,
-            scopes=frozenset(credential.scopes_json or []),
-            client_id=credential.client_id,
-            credential_id=credential.id,
-            agent_id=credential.agent_id,
-        )
         session, _ = create_public_session_row(
             db,
             principal,
@@ -199,6 +178,7 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
             ),
         )
         session_id = session.id
+    owned_public_session(db, principal, str(job.agent_id), session_id)
     job.session_id = session_id
     db.add(job)
     update_job(
@@ -220,6 +200,14 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
         attachments=attachments,
         channel="public_api",
     )
+    if principal.platform_subject is not None:
+        metadata = payload.get("metadata") or {}
+        allowed = metadata.get("allowed_platform_tools")
+        if allowed is not None and (not isinstance(allowed, list) or len(allowed) > 200
+                or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", name)
+                       for name in allowed)):
+            raise PublicAPIError(400, "PLATFORM_TOOLS_INVALID", "Invalid platform tool allowlist.")
+        request._platform_tools = allowed
     seen_event_ids: set[str] = set()
     worker_done = threading.Event()
     worker_result: dict[str, Any] = {}
@@ -229,6 +217,8 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
     def execute_harness() -> None:
         try:
             with data_services.session(None, purpose="public-run-worker") as worker_db:
+                from app.public_api.platform_subject import principal_for_job
+                principal_for_job(worker_db, worker_db.get(APIJob, job.id))
                 for item in AgentLoop(worker_db).handle_turn_stream(request):
                     if item.get("event") != "complete":
                         continue
@@ -505,7 +495,8 @@ def create_run_stream_route(
 
 def _owned_run(db: Session, principal: PublicPrincipal, run_id: str) -> APIJob:
     row = db.get(APIJob, run_id)
-    if not row or row.kind != "run" or row.tenant_id != principal.tenant_id:
+    from app.public_api.platform_subject import owns_job
+    if not row or row.kind != "run" or not owns_job(db, principal, row):
         raise PublicAPIError(404, "RUN_NOT_FOUND", "Run not found.")
     if principal.agent_id and row.agent_id != principal.agent_id:
         raise PublicAPIError(404, "RUN_NOT_FOUND", "Run not found.")
