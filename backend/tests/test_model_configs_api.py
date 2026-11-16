@@ -4,23 +4,29 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.api.model_configs import (
     create_model_config,
     delete_model_config,
+    list_model_configs,
+    model_config_read,
+    router,
     set_default_model_config,
     update_model_config,
 )
 from app.api.model_configs import (
     test_model_config as run_model_config_test,
 )
+from app.db import get_session
 from app.db.models import AgentModelBinding, ModelConfig, Tenant, User
 from app.llm import LLMError
 from app.llm.schemas import ModelConfigCreateRequest, ModelConfigUpdateRequest
-from app.security.encryption import encrypt_secret
+from app.security.auth import get_current_user
+from app.security.encryption import _fernet, encrypt_secret, mask_secret
 
 
 def _db(tmp_path) -> Session:
@@ -40,6 +46,76 @@ def _admin() -> User:
         role="admin",
         password_hash="unused",
     )
+
+
+@pytest.mark.parametrize("bad_key", ["invalid-token", "old-secret", "invalid-utf8"])
+@pytest.mark.parametrize("with_healthy_row", [False, True])
+def test_model_list_skips_only_undecryptable_rows(
+    tmp_path, caplog, bad_key, with_healthy_row
+) -> None:
+    plaintext = "synthetic-model-key-123456"
+    encrypted = {
+        "invalid-token": "corrupted-ciphertext",
+        "old-secret": _fernet("old-app-secret").encrypt(plaintext.encode()).decode(),
+        "invalid-utf8": _fernet().encrypt(b"\xff").decode(),
+    }[bad_key]
+    with _db(tmp_path) as db:
+        broken = ModelConfig(
+            id="broken", tenant_id="tenant_a", name="Broken", model="broken-model",
+            api_key_encrypted=encrypted, enabled=True, is_default=True,
+        )
+        db.add(broken)
+        if with_healthy_row:
+            db.add(ModelConfig(
+                id="healthy", tenant_id="tenant_a", name="Healthy", model="healthy-model",
+                api_key_encrypted=encrypt_secret(plaintext),
+            ))
+        db.add(Tenant(id="tenant_b", name="Other tenant"))
+        db.add(ModelConfig(
+            id="foreign", tenant_id="tenant_b", name="Foreign", model="foreign-model",
+            api_key_encrypted=encrypt_secret(plaintext),
+        ))
+        db.commit()
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[get_current_user] = _admin
+        app.dependency_overrides[get_session] = lambda: db
+        with TestClient(app) as client:
+            response = client.get("/api/enterprise/model-configs", params={"tenant_id": "tenant_a"})
+            assert response.status_code == 200, response.text
+            rows = response.json()
+            assert [row["id"] for row in rows] == (["healthy"] if with_healthy_row else [])
+            if rows:
+                assert rows[0]["api_key_masked"] == mask_secret(plaintext)
+            foreign = client.get("/api/enterprise/model-configs", params={"tenant_id": "tenant_b"})
+            assert foreign.status_code == 403
+
+        # Listing never deletes/disables the broken record or switches the default model.
+        db.refresh(broken)
+        assert broken.api_key_encrypted == encrypted
+        assert broken.enabled and broken.is_default
+        with pytest.raises(ValueError):
+            model_config_read(broken)
+        assert "broken" in caplog.text and "tenant_a" in caplog.text
+        assert plaintext not in caplog.text + response.text
+        assert encrypted not in caplog.text + response.text
+        assert "Traceback" not in caplog.text
+
+
+def test_model_list_does_not_hide_unrelated_errors(tmp_path, monkeypatch) -> None:
+    with _db(tmp_path) as db:
+        db.add(ModelConfig(
+            id="healthy", tenant_id="tenant_a", name="Healthy", model="healthy-model",
+            api_key_encrypted=encrypt_secret("synthetic-key"),
+        ))
+        db.commit()
+
+        def unexpected_error(_row):
+            raise ValueError("unrelated serialization bug")
+
+        monkeypatch.setattr("app.api.model_configs.model_config_read", unexpected_error)
+        with pytest.raises(ValueError, match="unrelated serialization bug"):
+            list_model_configs(tenant_id="tenant_a", db=db)
 
 
 def test_new_model_config_is_never_enabled_or_default(tmp_path) -> None:

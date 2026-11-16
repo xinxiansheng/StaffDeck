@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from time import monotonic
 from uuid import uuid4
@@ -36,9 +37,16 @@ from app.llm.schemas import (
     ModelProviderErrorDetail,
 )
 from app.security.auth import get_current_user, require_current_tenant
-from app.security.encryption import decrypt_secret, encrypt_secret, mask_secret
+from app.security.encryption import (
+    SecretDecryptionError,
+    decrypt_secret,
+    encrypt_secret,
+    mask_secret,
+)
 from app.security.permissions import ensure_tenant_admin, require_tenant_admin
 from app.security.tenant import ensure_tenant
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/enterprise/model-configs",
@@ -100,7 +108,18 @@ def list_model_configs(
 ) -> list[ModelConfigRead]:
     ensure_tenant(db, tenant_id)
     rows = db.exec(select(ModelConfig).where(ModelConfig.tenant_id == tenant_id)).all()
-    return [model_config_read(row) for row in rows]
+    result = []
+    for row in rows:
+        try:
+            result.append(model_config_read(row))
+        except SecretDecryptionError:
+            # Old or damaged ciphertext must not hide other usable configurations.
+            # Keep the row intact; never log its credential or an exception traceback.
+            logger.warning(
+                "Skipping model config with undecryptable credential: tenant_id=%s config_id=%s",
+                row.tenant_id, row.id,
+            )
+    return result
 
 
 @router.post("", response_model=ModelConfigRead)

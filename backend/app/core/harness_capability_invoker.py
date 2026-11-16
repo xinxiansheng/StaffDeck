@@ -1639,19 +1639,12 @@ def _is_user_facing_workspace_file(path: str) -> bool:
         return False
     first = parts[0]
     if (
-        first in {"attachments", ".harness"}
+        first == "attachments"
         or first.startswith("general_skill_")
     ):
         return False
     if any(
-        part in {
-            ".git",
-            ".harness-trash",
-            ".pytest_cache",
-            "__pycache__",
-            "node_modules",
-        }
-        or part.startswith(".tmp-")
+        part.startswith(".") or part in {"__pycache__", "node_modules"}
         for part in parts
     ):
         return False

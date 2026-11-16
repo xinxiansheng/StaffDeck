@@ -228,7 +228,7 @@ def test_provider_sandbox_local_invalid_arguments(module, host, invocation):
     res = invoke_provider(provider, host(), _call(invocation, "read_file"))
     assert res.success is False
     assert res.error["code"]
-    assert isinstance(res.extensions.get("details"), dict)
+    assert isinstance(res.error.get("details"), dict)
 
 
 def test_provider_sandbox_local_missing_file(module, host, invocation):
@@ -242,7 +242,8 @@ def test_provider_sandbox_local_nonzero_exit_is_a_failure(module, host, invocati
     provider = module(MODULE_ID).provider
     res = invoke_provider(provider, host(), _call(invocation, "exec_command", command="exit 3", timeout_seconds=5))
     assert res.success is False and res.error["code"] == "COMMAND_EXIT_NONZERO"
-    assert res.extensions["data"]["ok"] is not True
+    assert res.error["details"]["result"]["ok"] is False
+    assert res.error["details"]["result"]["exit_code"] == 3
 
 
 def test_provider_sandbox_local_cross_tenant_context_is_denied(module, host, invocation):

@@ -384,12 +384,17 @@ def test_v3_discovery_filters_process_paths_without_hiding_deliverable_scripts(t
         workspace_root=workspace, run_id="run", task_frame_id="frame",
         sandbox_enabled=True, network_mode="deny", allowed_domains=(),
     )
-    visible = {"report.md", "deliverables/result.csv", "deliverables/script.py"}
+    visible = {
+        "report.md", "deliverables/result.csv", "deliverables/script.py",
+        "deliverables/report.v2.md", "cache/result.txt",
+    }
     hidden = {
         "attachments/source.pdf", ".harness/internal.json", "general_skill_demo/runner.py",
         ".git/config", "work/.harness-trash/old.txt", "work/.pytest_cache/state",
         "work/__pycache__/code.pyc", "work/node_modules/lib.js", "work/.tmp-build/note.md",
         "work/temp.tmp", "work/partial.part", "work/code.pyc", "work/code.pyo",
+        ".cache/result.json", "work/.cache/result.json", ".env",
+        "deliverables/.draft.md", ".custom/result.txt", "work/.custom/nested/result.txt",
     }
     for name in visible | hidden:
         path = workspace / name

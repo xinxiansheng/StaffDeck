@@ -2063,6 +2063,10 @@ def test_workspace_discovery_returns_source_and_generated_image(
             },
         )
         (invoker.workspace_root / "chart.png").write_bytes(b"png")
+        for hidden in (".cache/result.json", "reports/.cache/result.json", "reports/.draft.md"):
+            hidden_path = invoker.workspace_root / hidden
+            hidden_path.parent.mkdir(parents=True, exist_ok=True)
+            hidden_path.write_text("internal", encoding="utf-8")
         artifacts = invoker.discover_artifacts()
 
     assert written["data"]["path"] == "/workspace/generate_chart.py"

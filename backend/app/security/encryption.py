@@ -6,6 +6,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.config import get_settings
 
 
+class SecretDecryptionError(ValueError):
+    """A stored credential cannot be decoded with the configured application secret."""
+
+
 def _fernet(app_secret: str | None = None) -> Fernet:
     secret = (app_secret if app_secret is not None else get_settings().app_secret).encode("utf-8")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
@@ -21,8 +25,8 @@ def decrypt_secret(value: str, *, app_secret: str | None = None) -> str:
         return ""
     try:
         return _fernet(app_secret).decrypt(value.encode("utf-8")).decode("utf-8")
-    except InvalidToken as exc:
-        raise ValueError("Secret cannot be decrypted with current APP_SECRET") from exc
+    except (InvalidToken, UnicodeError) as exc:
+        raise SecretDecryptionError("Secret cannot be decrypted with current APP_SECRET") from exc
 
 
 def mask_secret(value: str) -> str:
