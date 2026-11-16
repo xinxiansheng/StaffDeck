@@ -228,6 +228,9 @@ class HandoffCore:
             trigger_skill_id=trigger_skill_id, trigger_step_id=trigger_step_id, context_summary=context_summary, pending_question=pending_question,
             status="pending", metadata_json={**dict(metadata or {}), **({"assignee_notify_channel": notify_channel} if notify_channel else {})},
         )
+        if (session.channel_target_json or {}).get("_platform_subject"):
+            row.resume_payload_json = {"channel": session.channel,
+                                       "channel_target": dict(session.channel_target_json)}
         self.db.add(row)
         session.status = "handoff"
         session.awaiting_input_json = {"type": "human_handoff", "handoff_id": None, "pending_question": pending_question}

@@ -57,6 +57,22 @@ def restrict_snapshot(db, snapshot, request, session):
         raise PermissionDenied("平台执行身份与私有会话不一致")
     server_name = _gateway_name(subject["employee_id"])
     allowed = request._platform_tools
+    if request.channel == "human_handoff_resume":
+        # A resumed turn cannot acquire capabilities added after the original run.
+        allowed = (session.channel_target_json or {}).get("_platform_allowed_tools", [])
+    grants = tuple(
+        g
+        for g in snapshot.grants
+        if g.operation == "tool.invoke/v1"
+        and _allowed_tool(db, session.tenant_id, g.resource_id, server_name, allowed)
+    )
+    allowed = [g.resource_id for g in grants]
+    session.channel_target_json = {
+        **session.channel_target_json,
+        "_platform_allowed_tools": allowed,
+    }
+    db.add(session)
+    db.commit()
     return replace(
         snapshot,
         session_policy={
@@ -73,12 +89,7 @@ def restrict_snapshot(db, snapshot, request, session):
             "sandbox_network_mode": "deny",
             "sandbox_allowed_domains": [],
         },
-        grants=tuple(
-            g
-            for g in snapshot.grants
-            if g.operation == "tool.invoke/v1"
-            and _allowed_tool(db, session.tenant_id, g.resource_id, server_name, allowed)
-        ),
+        grants=grants,
     )
 
 

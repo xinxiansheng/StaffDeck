@@ -483,6 +483,12 @@ def test_private_handoff_keeps_initiator_and_accepts_assigned_reply(platform, mo
             db, "platform_key", subject=decode_subject(headers(token)["X-Platform-Subject"])
         )
         session = db.get(ChatSession, sid)
+        session.channel_target_json = {
+            **session.channel_target_json,
+            "_platform_allowed_tools": ["original-tool"],
+        }
+        db.add(session)
+        db.commit()
         core = for_session(db, session)
         context = handoff_context(db, session, core.guard.profile)
         row = core.create(
@@ -497,6 +503,9 @@ def test_private_handoff_keeps_initiator_and_accepts_assigned_reply(platform, mo
         assert row.assignee_user_id == principal.actor_user.id
         assert row.status == "assigned"
         assert row.notify_message_id is None
+        assert row.resume_payload_json["channel_target"]["_platform_allowed_tools"] == [
+            "original-tool"
+        ]
     path = f"/agents/agent_test/handoffs/{handoff_id}"
     assert "ALICE_PRIVATE_DECISION" in client.get(path, headers=headers(token)).text
     assert client.get(path, headers=headers(token, "bob")).status_code == 404
@@ -526,3 +535,68 @@ def test_private_handoff_keeps_initiator_and_accepts_assigned_reply(platform, mo
         client.post(cancel, headers=headers(token), json={"turn_id": "test-turn"}).status_code
         == 200
     )
+
+
+def test_handoff_resume_cannot_gain_a_later_gateway_capability(platform):
+    from app.db.models import ChatSession, MCPServer, Tool
+    from app.session.session_schema import ChatTurnRequest
+    from staffdeck_harness.capabilities.platform_isolation import restrict_snapshot
+    from staffdeck_harness.composition.compiler import (
+        CapabilityGrant,
+        CompositionSnapshot,
+        HookPlan,
+    )
+
+    client, engine, token = platform
+    sid = create_session(client, token)
+    with Session(engine) as db:
+        session = db.get(ChatSession, sid)
+        db.add(MCPServer(id="gateway", tenant_id="sd_tenant", name="platform_employeetest"))
+        for name in ("original", "later"):
+            db.add(
+                Tool(
+                    id=name,
+                    tenant_id="sd_tenant",
+                    name=name,
+                    tool_type="mcp",
+                    method="POST",
+                    url="",
+                    mcp_server_id="gateway",
+                )
+            )
+        db.commit()
+        snapshot = CompositionSnapshot(
+            "snapshot",
+            "sd_tenant",
+            "agent_test",
+            {},
+            None,
+            {},
+            {},
+            tuple(
+                CapabilityGrant("tool.invoke/v1", "tool", name, name)
+                for name in ("original", "later")
+            ),
+            (),
+            HookPlan({}),
+            (),
+            None,
+            (),
+        )
+        request = ChatTurnRequest(
+            tenant_id="sd_tenant",
+            agent_id="agent_test",
+            session_id=sid,
+            user_id=session.user_id,
+            message="initial",
+            channel="web",
+        )
+        request._platform_tools = ["original"]
+        first = restrict_snapshot(db, snapshot, request, session)
+        assert [g.resource_id for g in first.grants] == ["original"]
+        db.expire_all()
+        # The fresh composition has both tools; the original admitted ceiling survives recovery.
+        resumed = request.model_copy(update={"channel": "human_handoff_resume"})
+        resumed._platform_tools = None
+        limited = restrict_snapshot(db, snapshot, resumed, db.get(ChatSession, sid))
+        assert [g.resource_id for g in limited.grants] == ["original"]
