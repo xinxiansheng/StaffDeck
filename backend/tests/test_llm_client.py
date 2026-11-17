@@ -1043,7 +1043,7 @@ def test_generate_text_does_not_guess_image_support_from_model_name():
     }
 
 
-def test_generate_text_retries_without_images_only_after_provider_rejects_them():
+def test_generate_text_reports_unsupported_images_without_silent_text_retry():
     class RejectingImageCompletions(_FakeChatCompletions):
         def create(self, **kwargs):  # noqa: ANN003
             self.calls.append(kwargs)
@@ -1066,33 +1066,31 @@ def test_generate_text_retries_without_images_only_after_provider_rejects_them()
     client.temperature = 0.2
     client.max_output_tokens = 256
 
-    output = client.generate_text(
-        "system prompt",
-        {
-            "conversation_context": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "看图，并参考 /workspace/attachments/screen.png",
-                        "images": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "data:image/png;base64,AAAA"
-                                },
-                            }
-                        ],
-                    }
-                ]
-            }
-        },
-    )
+    with pytest.raises(LLMError) as caught:
+        client.generate_text(
+            "system prompt",
+            {
+                "conversation_context": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "看图，并参考 /workspace/attachments/screen.png",
+                            "images": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,AAAA"
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
 
-    assert output == "fallback-ok"
-    assert len(fake_client.chat.completions.calls) == 2
-    fallback_content = fake_client.chat.completions.calls[1]["messages"][1]["content"]
-    assert all(part.get("type") != "image_url" for part in fallback_content)
-    assert "/workspace/attachments/screen.png" in fallback_content[0]["text"]
+    assert caught.value.code == "IMAGE_INPUT_UNSUPPORTED"
+    assert len(fake_client.chat.completions.calls) == 1
 
 
 def test_generate_json_extracts_fenced_json(monkeypatch):

@@ -138,7 +138,8 @@ class AgentRunCreate(BaseModel):
     session_mode: Literal["stateful", "stateless"] = "stateful"
     external_session_id: str | None = None
     external_user_id: str | None = None
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=8,
+        description="Image uploads from /agents/{agent_id}/images use {id: pimg_...}; no remote URLs or inline base64. Existing uploaded file descriptors remain supported.")
     metadata: dict[str, Any] = Field(default_factory=dict)
     webhook_url: HttpUrl | None = None
 

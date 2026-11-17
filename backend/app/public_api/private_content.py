@@ -69,6 +69,33 @@ async def upload(
     return await upload_chat_attachments(principal.tenant_id, files, principal.actor_user, db)
 
 
+@router.post("/images", status_code=201)
+async def upload_images(
+    agent_id: str,
+    files: list[UploadFile] = File(...),
+    principal: PublicPrincipal = Depends(require_scopes("sessions:write")),
+    db: Session = Depends(get_session),
+):
+    ensure_public_agent(db, principal, agent_id)
+    from app.public_api.images import MAX_IMAGE_BYTES, MAX_RUN_IMAGES, stage_public_image
+
+    if not files or len(files) > MAX_RUN_IMAGES:
+        raise PublicAPIError(400, "TOO_MANY_IMAGES", "一次上传 1 至 8 张图片。")
+    images = []
+    try:
+        for file in files:
+            data = await file.read(MAX_IMAGE_BYTES + 1)
+            images.append(stage_public_image(data, file.filename or "image", file.content_type or "",
+                                            principal=principal, agent_id=agent_id))
+    except Exception:
+        # Only discard new, unreturned references from this batch.
+        from app.public_api.images import discard_public_image
+        for image in images:
+            discard_public_image(image["id"], principal=principal)
+        raise
+    return images
+
+
 @router.get("/memories")
 def memories(
     agent_id: str,

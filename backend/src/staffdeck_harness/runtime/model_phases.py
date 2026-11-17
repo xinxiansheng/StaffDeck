@@ -64,6 +64,8 @@ class EngineTurnPlanner:
             except EnginePhaseError as exc:
                 if exc.origin != "model":
                     raise
+                if exc.code == "IMAGE_INPUT_UNSUPPORTED":
+                    raise LLMError(exc.detail, code=exc.code) from exc
                 raise LLMError(f"LLM provider request failed (MODEL_UPSTREAM_UNAVAILABLE); message={exc.detail}") from exc
         try:
             plan = generate_structured(call, payload, TurnPlan.model_validate,

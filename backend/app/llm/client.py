@@ -253,9 +253,8 @@ class LLMClient:
                     if _image_parameter_unsupported(exc) and _messages_have_images(
                         request_messages
                     ):
-                        request_messages = _without_image_parts(request_messages)
-                        request["messages"] = request_messages
-                        continue
+                        raise LLMError("当前模型不支持图片输入，本次图片未被模型接受。",
+                                       code="IMAGE_INPUT_UNSUPPORTED") from exc
                     raise
                 content = _completion_message_content(completion)
                 metrics = _completion_span_metrics(completion)
@@ -439,8 +438,8 @@ class LLMClient:
                     if not emitted_text and _image_parameter_unsupported(
                         exc
                     ) and _messages_have_images(request_messages):
-                        request_messages = _without_image_parts(request_messages)
-                        continue
+                        raise LLMError("当前模型不支持图片输入，本次图片未被模型接受。",
+                                       code="IMAGE_INPUT_UNSUPPORTED") from exc
                     raise
                 if emitted_text:
                     response_text = "".join(recorded_parts)

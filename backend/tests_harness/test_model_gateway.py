@@ -182,3 +182,33 @@ def test_max_tokens_is_bounded_by_model_config(requested, cap, expected):
     body = {"messages": [], **({"max_tokens": requested} if requested is not None else {})}
     wire = ModelGateway._wire_request(client, SimpleNamespace(max_output_tokens=cap), body)
     assert wire.get("max_tokens") == expected
+
+
+@pytest.mark.parametrize('mode', ['complete', 'stream_start', 'stream_midway'])
+def test_image_rejection_is_explicit_in_every_provider_path(mode):
+    from app.core.harness_attachments import ValidatedTaskImagePayload
+
+    class RejectingDriver(_Driver):
+        def complete(self, request):
+            raise ValueError('image_url is unsupported by this model')
+
+        def stream(self, request):
+            if mode == 'stream_start':
+                raise ValueError('image_url is unsupported by this model')
+            def chunks():
+                raise ValueError('image_url is unsupported by this model')
+                yield  # pragma: no cover -- constructs an iterator that fails on first pull
+            return chunks()
+
+    reg = ActivationRegistry()
+    act, _traces = _activation(reg)
+    act.host.image_payloads = [ValidatedTaskImagePayload('im', 'x.png', 'image/png', 3,
+                                                       'data:image/png;base64,AAAA')]
+    client = _app(reg, _Client(RejectingDriver([], [])))
+    result = client.post(CHAT_COMPLETIONS_PATH, json={
+        'messages': [{'role': 'user', 'content': '看图'}], 'stream': mode != 'complete',
+    }, headers={'authorization': 'Bearer '+act.token})
+    assert result.status_code == (200 if mode == 'stream_midway' else 422)
+    assert 'IMAGE_INPUT_UNSUPPORTED' in result.text
+    assert act.host.model_error_code == 'IMAGE_INPUT_UNSUPPORTED'
+    assert '图片未被模型接受' in act.host.model_error

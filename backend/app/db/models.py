@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
-from sqlalchemy import JSON, Column, Index, Integer, UniqueConstraint
+from sqlalchemy import JSON, Column, Index, Integer, LargeBinary, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -1352,6 +1352,28 @@ class HarnessTurnRecord(SQLModel, table=True):
     finished_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class HarnessSessionCheckpoint(SQLModel, table=True):
+    """Immutable private session state and bounded workspace bytes at a turn boundary."""
+
+    __tablename__ = "harness_session_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("session_id", "before_message_id", name="uq_session_checkpoint_boundary"),
+    )
+
+    id: str = Field(default_factory=lambda: new_id("hcheckpoint"), primary_key=True)
+    tenant_id: str = Field(index=True)
+    session_id: str = Field(index=True)
+    before_message_id: str | None = Field(default=None, index=True)
+    status: str = "ready"
+    error_code: str | None = None
+    payload_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    archive_bytes: bytes | None = Field(default=None, sa_column=Column(LargeBinary))
+    digest: str = ""
+    size_bytes: int = 0
+    created_at: datetime = Field(default_factory=utc_now)
+    expires_at: datetime
 
 
 class HarnessSessionLeaseRecord(SQLModel, table=True):

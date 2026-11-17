@@ -806,7 +806,8 @@ class HarnessV3TaskAgent:
         from staffdeck_harness.runtime.completion import native_result
         model_error = getattr(getattr(self, "_execution_host", None), "model_error", None)
         if model_error:
-            return self._failed(requirement, "PROVIDER_ERROR", str(model_error), actions=actions)
+            code = getattr(self._execution_host, "model_error_code", None) or "PROVIDER_ERROR"
+            return self._failed(requirement, code, str(model_error), actions=actions)
 
         fin = slot.finish or (getattr(self, "_native_result", None) or native_result(final_text) if requirement.kind == "conversation" else None)
         if fin is None:

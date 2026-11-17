@@ -394,6 +394,8 @@ class TurnCoordinator:
         self.turn_record = turn_claim.record
         if turn_claim.replay is not None:
             return turn_claim.replay
+        from app.core.session_checkpoints import bind_checkpoint, capture_checkpoint
+        checkpoint = capture_checkpoint(self.db, session)
         from staffdeck_harness.runtime.execution import begin
         begin(self, request, session, turn_claim.record)
         self.services.mark_session_running(session)
@@ -405,6 +407,7 @@ class TurnCoordinator:
             metadata=self.services.user_message_metadata(request),
         )
         self.user_message_id = user_message.id
+        bind_checkpoint(self.db, checkpoint, user_message.id)
         self.current_source_turn_id = user_message.id
         self.turn_store.bind_user_message(
             self.turn_record,
@@ -946,6 +949,7 @@ class TurnCoordinator:
             session_state=public_session(session),
         )
         self.turn_store.complete(self.turn_record, response)
+        capture_checkpoint(self.db, session)
         return response
 
     def close(self) -> None:

@@ -27,6 +27,7 @@ from app.harness import HarnessArtifactAccessError, normalize_harness_artifact_p
 from app.public_api.auth import PublicPrincipal, enforce_agent_access, require_scopes
 from app.public_api.errors import PublicAPIError, RunExecutionFailure
 from app.public_api.idempotency import replay_idempotent_response, store_idempotent_response
+from app.public_api.images import resolve_run_attachments
 from app.public_api.jobs import (
     create_job,
     ensure_not_cancelled,
@@ -37,7 +38,7 @@ from app.public_api.jobs import (
 from app.public_api.jobs import stream_job_events
 from app.public_api.schemas import AgentRunCreate, PublicSessionCreate
 from app.public_api.sessions import create_public_session_row, ensure_public_agent, owned_public_session
-from app.session.session_schema import ChatAttachmentRead, ChatTurnRequest, ChatTurnResponse
+from app.session.session_schema import ChatTurnRequest, ChatTurnResponse
 
 
 router = APIRouter(tags=["runs"])
@@ -192,6 +193,8 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
     payload = dict(job.request_json or {})
     metadata = dict(payload.get("metadata") or {})
     model_id, context = _platform_run_options(db, principal, metadata)
+    attachments = resolve_run_attachments(payload.get("attachments") or [],
+                                         principal=principal, agent_id=str(job.agent_id))
     session_id = str(payload.get("session_id") or "").strip() or None
     stateless = payload.get("session_mode") == "stateless"
     if not session_id:
@@ -219,7 +222,6 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
         event_type="run.executing",
         event_data={"session_id": session_id, "engine": "harness_v3"},
     )
-    attachments = [ChatAttachmentRead.model_validate(item) for item in payload.get("attachments") or []]
     request = ChatTurnRequest(
         tenant_id=job.tenant_id,
         session_id=session_id,
@@ -487,6 +489,7 @@ def create_run_route(
     if replay:
         response.status_code = replay[0]
         return replay[1]
+    resolve_run_attachments(body.attachments, principal=principal, agent_id=agent_id)
     job = create_job(
         db,
         principal,
@@ -527,6 +530,7 @@ def create_run_stream_route(
         run_id = str(replay[1].get("id") or "")
         job = _owned_run(db, principal, run_id)
     else:
+        resolve_run_attachments(body.attachments, principal=principal, agent_id=agent_id)
         job = create_job(
             db,
             principal,

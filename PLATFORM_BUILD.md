@@ -1,6 +1,21 @@
 # 平台构建与增量说明
 
-## 最新：SOP 失败状态与真实错误回传（2026-11-17）
+## 最新：会话分叉与平台图片输入（2026-11-17）
+
+基于 `55a3ce05`，新增两项 Public API 能力，继续保留之前的隔离、原件导入、拒绝审计与 SOP 失败处理。平台业务界面和开关由平台团队接入，本轮未部署。
+
+- `POST /api/v1/agents/{agentId}/sessions/{sessionId}:fork`：携带 `Idempotency-Key` 和 `{"beforeMessageId":"用户消息ID"}`。从该消息之前的真实检查点复制消息、槽位、技能栈、任务进度与工作区，返回 `sessionId`、来源和 `copied`。原分支不变；外部动作、运行租约、回调与长期记忆不复制。人工 / 外部等待需在新分支重新确认。源会话执行或排队时拒绝，同键重试返回同一新会话，恢复失败不暴露半个会话。
+- `POST /api/v1/agents/{agentId}/images`：multipart `files`，PNG / JPEG / WebP，每张最多 4 MiB，一次最多 8 张。返回 `pimg_...` 引用；创建运行时传 `attachments:[{"id":"pimg_..."}]`。引用绑定租户、用户和员工，7 天过期；执行前再验证。原图进入模型和本次工作区，模型明确拒图时失败为 `IMAGE_INPUT_UNSUPPORTED`，不再删除图片后按文本成功返回。
+
+两接口使用现有 `sessions:write`，运行使用 `runs:create`；平台委托还需 `platform:delegate` 和既有 `X-Platform-Subject`。无通用 URL 抓取或网络放宽。图片暂存到期不删除已使用的会话 / 工作区副本。
+
+StaffDeck 启动时自动创建 SQLite 表 `harness_session_checkpoints`，不改旧消息，不为旧消息伪造历史。保留 30 天、最近 50 个检查点、每会话 512 MiB，先到为准；单份 64 MiB（状态 JSON 最多 8 MiB），最多 2,000 条工作区路径。过期、超限、无历史或不安全文件均返回明确错误；聊天本身仍可继续。标准每小时 Public API 维护清理过期快照与图片暂存；后台维护被关闭时须另行安排。SQLite 空闲页供复用，数据库文件不会因此立即缩小。
+
+**789 项 StaffDeck + 1 项真实 Java HTTP 本机验收通过**，零失败 / 错误 / 跳过。真实 Node 验证了分叉后旧文件 / 旧 SOP 进度继续执行（包括重启引擎）、新旧分支隔离，以及图片真正进入规划 / 执行请求和拒图明确失败。使用脚本模型；测试服模型能否看图、真实业务交付和目标 Linux 镜像仍待现场验收。
+
+继续使用 `Dockerfile.platform` 从固定源码构建，无新增运行依赖。升级按既有流程备份 SQLite 和数据卷，保留 APP_SECRET。回退到 `55a3ce05` 前关闭新入口、排空运行，保留新增表和数据；旧版本不会维护新式检查点。平台契约、示意图与完整交接位于平台仓库 `docs/contracts/PRD-007/staffdeck-runtime-extensions.md` 和 `docs/features/PRD-007/F-I3/runtime-extensions.md`。
+
+## 前一增量：SOP 失败状态与真实错误回传（2026-11-17）
 
 基于 `7dc871b3`，继续保留原件导入、拒绝审计和 member 网关授权修复。本次只改 StaffDeck 运行处理；不改测试服工具白名单、SOP 路由、模型或数据库结构。
 

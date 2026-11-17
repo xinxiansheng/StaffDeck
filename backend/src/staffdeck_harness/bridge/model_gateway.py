@@ -56,6 +56,17 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "type": code.lower(), "message": message}}, status_code=status)
 
 
+def _provider_failure(host, exc: Exception, wire: dict) -> tuple[int, str, str]:
+    from app.llm.client import _image_parameter_unsupported, _messages_have_images
+
+    unsupported = (_messages_have_images(wire.get("messages", []))
+                   and _image_parameter_unsupported(exc))
+    host.model_error_code = "IMAGE_INPUT_UNSUPPORTED" if unsupported else "PROVIDER_ERROR"
+    host.model_error = ("当前模型不支持图片输入，本次图片未被模型接受。" if unsupported
+                        else provider_error_message(exc))
+    return (422 if unsupported else 502), host.model_error_code, host.model_error
+
+
 def _bearer(request: Request) -> str | None:
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
@@ -124,6 +135,7 @@ class ModelGateway:
             return _error(404, "ACTIVATION_FENCED", "no live activation for this token (turn finished or cancelled)")
         model_config = getattr(act.host, "model_config", None)
         act.host.model_error = None
+        act.host.model_error_code = None
         if model_config is None:
             return _error(409, "MODEL_NOT_CONFIGURED", "该员工没有可用的默认模型，请先在「模型配置」中设置")
         try:
@@ -171,10 +183,10 @@ class ModelGateway:
             try:
                 completion = await loop_run(None, adapter.complete, wire)
             except Exception as exc:  # noqa: BLE001
-                act.host.model_error = provider_error_message(exc)
+                status, code, message = _provider_failure(act.host, exc, wire)
                 if trace:
                     trace("llm_call_failed", {**span, "duration_ms": _ms(started), "error": provider_error_message(exc)})
-                return _error(502, "PROVIDER_ERROR", provider_error_message(exc))
+                return _error(status, code, message)
             data = _dump(completion)
             if trace:
                 trace("llm_call_finished", {**span, "duration_ms": _ms(started), "status": "success", **_usage(data.get("usage"))})
@@ -184,10 +196,10 @@ class ModelGateway:
         try:
             chunks: Iterator[Any] = await loop_run(None, adapter.stream, wire)
         except Exception as exc:  # noqa: BLE001
-            act.host.model_error = provider_error_message(exc)
+            status, code, message = _provider_failure(act.host, exc, wire)
             if trace:
                 trace("llm_call_failed", {**span, "duration_ms": _ms(started), "error": provider_error_message(exc)})
-            return _error(502, "PROVIDER_ERROR", provider_error_message(exc))
+            return _error(status, code, message)
 
         async def body_iter() -> AsyncIterator[bytes]:
             usage: dict[str, Any] = {}
@@ -212,11 +224,11 @@ class ModelGateway:
                     trace("llm_call_finished", {**span, "duration_ms": _ms(started), "status": "success", "finish_reason": finish_reason, **_usage(usage)})
             except Exception as exc:  # noqa: BLE001
                 logger.exception("model gateway stream failed")
-                act.host.model_error = provider_error_message(exc)
+                _status, code, message = _provider_failure(act.host, exc, wire)
                 if trace:
                     trace("llm_call_failed", {**span, "duration_ms": _ms(started), "error": provider_error_message(exc)})
                 # Mid-stream: the only thing the engine can act on is an error payload before [DONE]
-                yield f"data: {json.dumps({'error': {'code': 'PROVIDER_ERROR', 'message': provider_error_message(exc)}})}\n\n".encode()
+                yield f"data: {json.dumps({'error': {'code': code, 'message': message}})}\n\n".encode()
 
         return StreamingResponse(body_iter(), media_type="text/event-stream", headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
 

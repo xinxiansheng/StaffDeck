@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Header, Request, Response
 from sqlmodel import Session, select
 
@@ -11,6 +13,8 @@ from app.public_api.platform_subject import scoped_key
 from app.public_api.idempotency import replay_idempotent_response, store_idempotent_response
 from app.public_api.schemas import PublicSessionCreate, PublicSessionUpdate
 from app.public_api.utils import etag_for
+from app.public_api.session_forks import PublicSessionFork, fork_public_session
+from app.db import get_session as get_db_session
 
 
 router = APIRouter(prefix="/agents/{agent_id}/sessions", tags=["sessions"])
@@ -252,3 +256,15 @@ def update_session(
     payload = _session_payload(row, binding)
     response.headers["ETag"] = etag_for(payload)
     return payload
+
+
+@router.post("/{session_id}:fork", response_model=dict, status_code=201)
+def fork_session(
+    agent_id: str,
+    session_id: str,
+    body: PublicSessionFork,
+    request: Request,
+    principal: Annotated[PublicPrincipal, Depends(require_scopes("sessions:write"))],
+    db: Annotated[Session, Depends(get_db_session)],
+) -> dict:
+    return fork_public_session(db, principal, request, agent_id, session_id, body)

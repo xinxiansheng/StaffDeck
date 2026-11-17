@@ -203,6 +203,7 @@ class AgentLoop:
         user_message_id: str | None = None
         step_result = StepAgentResult(action="reply")
         runtime_error_code: str | None = None
+        error_projection_pending = False
         try:
             return engine.run(request)
         except (HarnessTurnConflict, HarnessSessionBusy) as exc:
@@ -253,6 +254,9 @@ class AgentLoop:
             for turn_id in (user_message_id, request.client_turn_id):
                 if turn_id:
                     clear_chat_turn_cancelled(chat_session.id, turn_id)
+            if getattr(engine, "session_lease", None) is not None:
+                from app.core.session_checkpoints import capture_checkpoint
+                capture_checkpoint(self.db, chat_session)
             return ChatTurnResponse(
                 reply=CANCELLED_ASSISTANT_REPLY,
                 session_id=chat_session.id,
@@ -263,26 +267,32 @@ class AgentLoop:
             chat_session = engine.session
             engine.mark_interrupted(exc.code, exc.message)
             chat_session = chat_session or self._get_or_create_session(request)
-            return self._finish_with_error(chat_session, exc.code, exc.message)
+            response = self._finish_with_error(chat_session, exc.code, exc.message)
+            if getattr(engine, "session_lease", None) is not None:
+                from app.core.session_checkpoints import capture_checkpoint
+                capture_checkpoint(self.db, chat_session)
+            return response
         except LLMError as exc:
-            runtime_error_code = "LLM_ERROR"
+            runtime_error_code = "IMAGE_INPUT_UNSUPPORTED" if getattr(exc, "code", None) == "IMAGE_INPUT_UNSUPPORTED" else "LLM_ERROR"
             chat_session = engine.session
             user_message_id = engine.user_message_id
-            engine.mark_interrupted("LLM_ERROR", str(exc))
+            engine.mark_interrupted(runtime_error_code, str(exc))
             chat_session = chat_session or self._get_or_create_session(request)
             self.events.record(
                 request.tenant_id,
                 chat_session.id,
                 "error_occurred",
-                {"code": "LLM_ERROR", "message": str(exc)},
+                {"code": runtime_error_code, "message": str(exc)},
             )
             self.db.commit()  # close() rolls back its caller transaction before releasing the lease
             reply = format_runtime_failure_reply(
-                "模型调用失败", exc, "LLM_ERROR", model_failure_suggestion(exc)
+                "模型调用失败", exc, runtime_error_code, model_failure_suggestion(exc)
             )
+            error_projection_pending = True
         except Exception as exc:  # noqa: BLE001 - report any runtime failure through the turn boundary
             storage_error = isinstance(exc, EngineStoragePermissionDenied)
-            runtime_error_code = exc.code if storage_error else "HARNESS_V3_ERROR"
+            image_error = getattr(exc, "code", None) == "IMAGE_INPUT_UNSUPPORTED"
+            runtime_error_code = exc.code if storage_error or image_error else "HARNESS_V3_ERROR"
             chat_session = engine.session
             user_message_id = engine.user_message_id
             engine.mark_interrupted(runtime_error_code, str(exc))
@@ -300,6 +310,7 @@ class AgentLoop:
                 runtime_error_code,
                 "请管理员修复引擎目录权限后重试。" if storage_error else "请查看执行记录或服务日志定位具体原因。",
             )
+            error_projection_pending = True
         finally:
             terminal_record = getattr(engine, "turn_record", None)
             terminal_session = getattr(engine, "session", None)
@@ -311,30 +322,37 @@ class AgentLoop:
                 for turn_id in (engine.user_message_id, request.client_turn_id):
                     if turn_id:
                         clear_chat_turn_cancelled(terminal_session.id, turn_id)
-            engine.close()
+            if not error_projection_pending:
+                engine.close()
 
-        reply = self._finalize_turn(
-            chat_session,
-            request.tenant_id,
-            reply,
-            step_result,
-            request.message,
-            user_message_id=user_message_id,
-            assistant_metadata_override=(
-                {"runtime_error_code": runtime_error_code, "execution_engine": "harness_v3",
-                 **({"message_visibility": request.message_visibility}
-                    if request.message_visibility != "visible" else {})}
-            ),
-        )
-        self.db.commit()
-        self.db.refresh(chat_session)
-        return ChatTurnResponse(
-            reply=reply,
-            session_id=chat_session.id,
-            runtime_error_code=runtime_error_code,
-            step_result=step_result,
-            session_state=public_session(chat_session),
-        )
+        try:
+            reply = self._finalize_turn(
+                chat_session,
+                request.tenant_id,
+                reply,
+                step_result,
+                request.message,
+                user_message_id=user_message_id,
+                assistant_metadata_override=(
+                    {"runtime_error_code": runtime_error_code, "execution_engine": "harness_v3",
+                     **({"message_visibility": request.message_visibility}
+                        if request.message_visibility != "visible" else {})}
+                ),
+            )
+            self.db.commit()
+            self.db.refresh(chat_session)
+            if getattr(engine, "session_lease", None) is not None:
+                from app.core.session_checkpoints import capture_checkpoint
+                capture_checkpoint(self.db, chat_session)
+            return ChatTurnResponse(
+                reply=reply,
+                session_id=chat_session.id,
+                runtime_error_code=runtime_error_code,
+                step_result=step_result,
+                session_state=public_session(chat_session),
+            )
+        finally:
+            engine.close()
 
     def handle_turn_stream(self, request: ChatTurnRequest) -> Iterator[dict[str, object]]:
         request._control_subject = getattr(self.db, "info", {}).get("staffdeck_control_subject")

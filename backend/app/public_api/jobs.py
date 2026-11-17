@@ -694,8 +694,13 @@ def recover_public_jobs() -> None:
 
 
 def cleanup_public_api_records() -> None:
+    from app.core.session_checkpoints import cleanup_expired_checkpoints
+    from app.public_api.images import cleanup_expired_public_images
+
+    cleanup_expired_public_images()
     cutoff = utc_now() - timedelta(days=get_settings().public_api_retention_days)
     for db in maintenance_sessions(engine):
+        cleanup_expired_checkpoints(db)
         old_events = db.exec(
             select(APIJobEvent).where(APIJobEvent.created_at < cutoff)
         ).all()
