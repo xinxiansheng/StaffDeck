@@ -26,6 +26,10 @@ class MCPClientError(RuntimeError):
     pass
 
 
+class MCPToolNotExecutedError(MCPClientError):
+    """A remote assertion, trusted only after the host verifies the platform gateway."""
+
+
 MCP_APPS_EXTENSION_ID = "io.modelcontextprotocol/ui"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 
@@ -897,6 +901,11 @@ def _tool_result_envelope(result: Any) -> dict[str, Any]:
             "is_error": False,
         }
     if result.get("isError"):
+        structured = result.get("structuredContent")
+        error = structured.get("error") if isinstance(structured, dict) else None
+        if (isinstance(error, dict) and error.get("code") == "PLATFORM_GATEWAY_REJECTED"
+                and error.get("executed") is False):
+            raise MCPToolNotExecutedError("平台网关拒绝了本次调用，业务操作未执行。")
         raise MCPClientError(_content_text(result.get("content")) or "MCP tool returned isError=true。")
     content = result.get("content")
     structured_content = result.get("structuredContent")

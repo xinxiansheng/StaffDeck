@@ -258,7 +258,15 @@ class CapabilityHost:
 
     def invoke_proxy(self, proxy_name: str, arguments: Mapping[str, Any], ctx: InvocationContext) -> tuple[ModuleResult, Receipt | None]:
         with self._invoke_lock:
-            return self._invoke_proxy(proxy_name, arguments, ctx)
+            recorded = len(self.results)
+            result, receipt = self._invoke_proxy(proxy_name, arguments, ctx)
+            if not result.success and len(self.results) == recorded:
+                op = PROXY_TOOLS.get(proxy_name, {}).get("operation", "proxy.invoke/v1")
+                inv = ModuleInvocation(ctx.trace_id or f"hcall_{time.time_ns()}",
+                    op.split(".")[0], op, dict(arguments), ctx,
+                    binding_id=str(arguments.get("tool_id") or arguments.get("resource_id") or ""))
+                receipt = self._record_refusal(inv, result, receipt)
+            return result, receipt
 
     def _invoke_proxy(self, proxy_name: str, arguments: Mapping[str, Any], ctx: InvocationContext) -> tuple[ModuleResult, Receipt | None]:
         try:
@@ -325,11 +333,26 @@ class CapabilityHost:
 
     def invoke(self, inv: ModuleInvocation) -> tuple[ModuleResult, Receipt | None]:
         with self._invoke_lock:
+            recorded = len(self.results)
             try:
                 with self.registry.work_lease() if self.registry else nullcontext():
-                    return self._invoke(inv)
+                    result, receipt = self._invoke(inv)
             except ModuleSdkError as exc:
-                return ModuleResult.fail(exc.code, exc.message), None
+                result, receipt = ModuleResult.fail(exc.code, exc.message), None
+            if not result.success and len(self.results) == recorded:
+                receipt = self._record_refusal(inv, result, receipt)
+            return result, receipt
+
+    def _record_refusal(self, inv, result, receipt):
+        # Never create rows under an untrusted tenant/session or acquire the
+        # original write's idempotency key when auditing an early refusal.
+        if (inv.context.tenant_id == self.slot.snapshot.tenant_id
+                and inv.context.agent_id == self.slot.snapshot.staff_id
+                and inv.context.session_id == self.slot.session_id):
+            if receipt is None:
+                receipt = self._ledger.refuse(inv, result.error or {})
+            self._record_result(inv, result, receipt)
+        return receipt
 
     def _invoke(self, inv: ModuleInvocation) -> tuple[ModuleResult, Receipt | None]:
         from staffdeck_harness.capabilities.platform_isolation import require_invocation
@@ -356,7 +379,7 @@ class CapabilityHost:
 
         # 1b. pre_tool hooks. The default ``activation.allowlist`` narrows against the frozen
         #     snapshot; a ``capability.pep`` handler marks intent. Hooks can deny a call before it
-        #     touches the ledger — nothing is recorded for a refused call, it is only traced.
+        #     executes. The wrapper records a denied attempt without a write claim.
         pre = self._hooks("pre_tool", inv) if self._hooks else None
         if pre is not None and pre.kind == "deny":
             self._emit("capability_denied", {"operation": inv.operation, "resource": inv.binding_id, "reason": pre.reason, "point": "pre_tool"})
@@ -370,6 +393,11 @@ class CapabilityHost:
                 descriptor = descriptors[0]
                 inv = replace(inv, side_effecting=descriptor.side_effecting or inv.side_effecting,
                               replayable=descriptor.replayable, idempotency_key_fields=descriptor.idempotency_key_fields)
+                from staffdeck_harness.capabilities.platform_isolation import is_platform_original
+                if is_platform_original(self.db, self.slot.snapshot, inv.binding_id):
+                    # Fetching an original is a read even though the MCP transport is POST.
+                    inv = replace(inv, side_effecting=False,
+                                  metadata={**inv.metadata, "platform_original": True})
                 if descriptor.input_schema and inv.operation in {"tool.invoke/v1", "mcp.invoke/v1", "a2a.invoke/v1"}:
                     from jsonschema import ValidationError, validate
                     args = {k: value for k, value in inv.arguments.items() if k != "tool_id"}
@@ -429,6 +457,12 @@ class CapabilityHost:
         self.current_receipt = receipt
         result = self.project_result(inv, result)
         self._ledger.cache_projection(receipt, result)
+        self._record_result(inv, result, receipt)
+        if result.success:
+            self._record_evidence(inv, result)
+        return result, receipt
+
+    def _record_result(self, inv, result, receipt):
         name = inv.operation
         descriptor = self._descriptors.get((inv.operation, inv.binding_id))
         if descriptor is not None:
@@ -440,6 +474,8 @@ class CapabilityHost:
         self.results.append({"tool_name": name, "operation": inv.operation, "resource_id": inv.binding_id,
                              "success": result.success, "data": result.data, "error": result.error,
                              "citations": list(result.citations), "receipt": receipt.to_json()})
+
+    def _record_evidence(self, inv, result):
         if result.success:
             for c in result.citations or ():
                 if isinstance(c, Mapping):
@@ -456,7 +492,6 @@ class CapabilityHost:
                     "evidence_pack": list(ev.get("evidence_pack") or [])[:12],
                     "invocation_id": inv.invocation_id,
                 })
-        return result, receipt
 
     # -- internals ----------------------------------------------------------------
 
@@ -525,6 +560,10 @@ class CapabilityHost:
         previous = self._descriptors.get((grant.operation, grant.resource_id))
         if previous is not None and previous.digest and previous.digest != d.digest:
             raise ModuleSdkError("资源在本次执行中发生变化，请重新装配", code="CAPABILITY_SNAPSHOT_CHANGED")
+        from staffdeck_harness.capabilities.platform_isolation import is_platform_original
+        if is_platform_original(self.db, self.slot.snapshot, grant.resource_id):
+            from staffdeck_harness.capabilities.platform_originals import DESCRIPTION
+            d = replace(d, description=DESCRIPTION, side_effecting=False)
         self._descriptors[(grant.operation, grant.resource_id)] = d
         return d
 
@@ -615,7 +654,29 @@ class CapabilityHost:
             agent_row=self._local_agent(),
             trace=self.trace,
             remaining_seconds=self.slot.remaining_seconds,
+            tool_result_filter=self._filter_tool_result,
         )
+
+    def _filter_tool_result(self, inv, result):
+        from staffdeck_harness.capabilities.platform_isolation import require_invocation
+        if not self.slot.snapshot.session_policy.get("platform_gateway_server"):
+            return result
+        # Trust a structured not-executed assertion only from the admitted platform
+        # gateway. Old text-only refusals may follow a write/revocation: stay unknown.
+        if not result.success and (result.error or {}).get("code") == "MCP_NOT_EXECUTED":
+            return ModuleResult(success=False, error={"code": "PLATFORM_GATEWAY_REJECTED",
+                "message": "平台网关拒绝了本次调用，业务操作未执行。", "executed": False, "retryable": False})
+        if not inv.metadata.get("platform_original"):
+            return result
+        if not result.success:
+            return ModuleResult.fail("PLATFORM_ORIGINAL_UNAVAILABLE", "平台未提供可下载的原件，请检查权限和运行状态。")
+        from staffdeck_harness.capabilities.platform_originals import import_original
+        def reauthorize():
+            require_invocation(self.db, self.slot.snapshot, inv)
+            self.fence.check(self.slot)
+            self._pep(inv)
+        return import_original(result.data, self._workspace_root(inv.context), reauthorize,
+                               remaining_seconds=self.slot.remaining_seconds())
 
     def _workspace_root(self, ctx: InvocationContext) -> Path:
         if self._workspace is None:

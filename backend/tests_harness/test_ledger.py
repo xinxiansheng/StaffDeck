@@ -80,6 +80,20 @@ def test_denied_and_cancelled_release_claim(db) -> None:
     assert ledger.replay_or_block(_inv("d4")) is None
 
 
+def test_gateway_refusal_is_failed_but_transport_error_is_unknown(db):
+    ledger = InvocationLedger(db)
+    r = ledger.finish(ledger.start(_inv("gateway")),
+                      ModuleResult.fail("PLATFORM_GATEWAY_REJECTED", "not executed"))
+    assert r.status == "failed" and r.side_effect_key is None
+    prior = ledger.finish(ledger.start(_inv("timeout")), ModuleResult.fail("MCP_ERROR", "timeout"))
+    assert prior.status == "outcome_unknown" and prior.side_effect_key
+    denied = ledger.refuse(_inv("later-attempt"), {"code": "PERMISSION_DENIED"})
+    assert denied.status == "denied" and denied.side_effect_key is None
+    with pytest.raises(OutcomeUnknown):
+        ledger.replay_or_block(_inv("still-blocked"))
+    assert ledger.unknown_outcomes("t1")[0].id == prior.ledger_id
+
+
 def test_side_effect_key_scoped_to_step_and_arguments() -> None:
     a = _inv("k1").side_effect_key()
     b = _inv("k2").side_effect_key()

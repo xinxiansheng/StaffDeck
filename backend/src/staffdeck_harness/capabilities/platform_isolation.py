@@ -40,6 +40,17 @@ def _allowed_tool(db, tenant_id, tool_id, server_name, allowed):
     return allowed is None or tool.id in allowed or tool.name in allowed
 
 
+def is_platform_original(db, snapshot, tool_id):
+    policy = snapshot.session_policy
+    server = policy.get("platform_gateway_server")
+    if not server or not _allowed_tool(db, snapshot.tenant_id, tool_id, server,
+                                       policy.get("platform_allowed_tools")):
+        return False
+    tool = db.get(Tool, tool_id)
+    config = tool.config_json or {}
+    return str(config.get("tool") or config.get("tool_name") or "").strip() == "workbench_file_original"
+
+
 def restrict_snapshot(db, snapshot, request, session):
     actor = db.get(User, request.user_id) if request.user_id else None
     subject = (session.channel_target_json or {}).get("_platform_subject")
@@ -67,6 +78,14 @@ def restrict_snapshot(db, snapshot, request, session):
         and _allowed_tool(db, session.tenant_id, g.resource_id, server_name, allowed)
     )
     allowed = [g.resource_id for g in grants]
+    # Preserve only references already visible in this employee's snapshot.
+    # Do not enumerate the tenant catalog or expose endpoints/credentials.
+    filtered = [{"capability_id": g.resource_id, "name": g.name,
+                 "kind": {"knowledge_base": "knowledge", "general_skill": "general_skill"}.get(g.resource_type, "tool"),
+                 "capability_scope": g.scope, "available": False,
+                 "unavailable_reason": "PLATFORM_GATEWAY_REQUIRED",
+                 "metadata": {"resource_id": g.resource_id, "operation": g.operation}}
+                for g in snapshot.grants if g not in grants]
     session.channel_target_json = {
         **session.channel_target_json,
         "_platform_allowed_tools": allowed,
@@ -79,6 +98,7 @@ def restrict_snapshot(db, snapshot, request, session):
             **snapshot.session_policy,
             "platform_gateway_server": server_name,
             "platform_allowed_tools": allowed,
+            "platform_unavailable_references": filtered,
             "platform_subject": subject,
             "platform_credential": (
                 db.info.get("staffdeck_platform_principal").credential_id

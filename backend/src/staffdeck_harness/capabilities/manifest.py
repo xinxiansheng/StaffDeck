@@ -16,7 +16,8 @@ class SnapshotManifestBuilder:
             active_node_id=step_id, session_id=engine.session.id if engine.session else None)
         host = CapabilityHost(engine.db, engine.guard, engine.security_context, slot,
                               LifecycleFence(engine.registry.generation))
-        available, unavailable, display_names = [], [], {}
+        available, unavailable, display_names = [], [CapabilityDescriptor(**item) for item in
+            engine.snapshot.session_policy.get("platform_unavailable_references", [])], {}
         for grant in slot.grants():
             kind = {"knowledge_base": "knowledge", "general_skill": "general_skill"}.get(grant.resource_type, "tool")
             item = CapabilityDescriptor(capability_id=grant.resource_id, name=grant.name,
@@ -45,8 +46,9 @@ class SnapshotManifestBuilder:
                 unavailable.append(item)
         events = getattr(engine, 'events', None)
         session = getattr(engine, 'session', None)
-        if display_names and session is not None and callable(getattr(events, 'record', None)):
+        if (display_names or unavailable) and session is not None and callable(getattr(events, 'record', None)):
             events.record(tenant_id, session.id, 'capability_manifest_resolved',
-                          {'turn_id': engine.user_message_id, 'trace_names': {'tools': display_names}})
+                          {'turn_id': engine.user_message_id, 'trace_names': {'tools': display_names},
+                           'unavailable_references': [item.model_dump(mode='json') for item in unavailable]})
         return CapabilityManifest(available=available, unavailable_references=unavailable,
                                   snapshot_revision=engine.snapshot.snapshot_id)

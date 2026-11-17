@@ -19,7 +19,12 @@ from app.security.internal_service import INTERNAL_SERVICE_HEADER, internal_serv
 from app.tools.a2a_client import A2AClient, A2AClientError
 from app.tools.external_tasks import callback_token_hash, new_callback_token
 from app.tools.http_request import prepare_get_request
-from app.tools.mcp_client import MCPClientError, execute_mcp_tool, execute_mcp_tool_result
+from app.tools.mcp_client import (
+    MCPClientError,
+    MCPToolNotExecutedError,
+    execute_mcp_tool,
+    execute_mcp_tool_result,
+)
 from app.tools.tool_schema import MCPAppDescriptor, ToolCall, ToolError, ToolResult
 
 SECRET_PATTERN = re.compile(r"\$\{secret\.([A-Z0-9_]+)\}")
@@ -436,7 +441,7 @@ class ToolExecutor:
                 ),
             )
         except MCPClientError as exc:
-            return self._error(tool.name, "MCP_ERROR", str(exc))
+            return self._error(tool.name, "MCP_NOT_EXECUTED" if isinstance(exc, MCPToolNotExecutedError) else "MCP_ERROR", str(exc))
         except Exception as exc:
             return self._error(tool.name, "MCP_EXECUTION_ERROR", str(exc))
 

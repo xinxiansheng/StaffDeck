@@ -1,6 +1,22 @@
 # 平台构建与增量说明
 
-## 最新：平台委托 member 调用员工网关
+## 最新：委托运行原件导入与拒绝审计（2026-11-17）
+
+基于 `289126c3`。委托沙箱继续 `network_mode=deny`、`allowed_domains=[]`。已授权的 `workbench_file_original` 返回一次性链接后，由 StaffDeck 服务端按部署配置下载，核对大小和 SHA-256，放入当前任务的 `attachments/originals/`，返回 `workspace_path`。不依赖 curl、Perl 模块、shell 变量或重定向，不修改 SRT 策略。
+
+运行容器新增环境变量（必须与平台返回的完整前缀一致）：
+
+```text
+STAFFDECK_PLATFORM_ORIGINAL_BASE_URL=http://172.17.0.1:18082/workbench/originals/
+```
+
+不配置时拒绝原件下载。只接受指定 scheme / host / port / 路径后追加 43 位 token；不接受其他地址、重定向或编码穿越，不使用环境代理。平台继续负责 300 秒过期、一次性消费和当前运行绑定。下载最多 12 MiB，下载前后重新验证授权；文件大小、哈希或安全目录检查失败则清理下载文件。模型和调用结果不保留一次性链接，输入原件不自动发布为成果。
+
+拒绝审计补齐：被平台策略过滤的原快照资源进入 `unavailable_references`；前置拒绝 / 运行中撤权进入调用账本和 `tool_calls`。确定未进入执行的网关拒绝记 `failed`，已进入执行或不确定的写调用仍保留 `outcome_unknown`。此分类需要平台同时提供 `structuredContent.error={code:PLATFORM_GATEWAY_REJECTED,executed:false}`；旧平台的纯文本拒绝继续保守处理，不能仅凭文案断定未执行。普通 MCP 不能用同名字段获得平台网关待遇。
+
+复用 `Dockerfile.platform` 构建本次分支固定版本，不叠补丁、不提升 member、不迁移数据库。原件下载可先只更新 StaffDeck 并配置地址；要完成新的拒绝状态分类，必须同时更新平台网关生产者。详细契约、测试数量和两仓库准确 SHA 见平台仓库 `docs/features/PRD-007/F-I3/original-delivery-fix.md` 及交付 manifest。本轮验证为本机合成业务服务、真实 API / Node / SRT，不是目标 Linux 镜像或线上业务验收。
+
+## 前一增量：平台委托 member 调用员工网关
 
 基于 `30d945d9679d57745001c9a0f98c6b3fa4c36f8c` 修复：员工只绑定 MCP 工具、未单独绑定 MCP 服务器时，member 在工具清单和执行阶段被服务器 PEP 拒绝。
 

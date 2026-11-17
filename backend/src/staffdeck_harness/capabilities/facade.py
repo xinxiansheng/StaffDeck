@@ -73,6 +73,7 @@ class FacadeDeps:
     agent_row: Any | None = None
     trace: Callable[[str, dict[str, Any]], None] | None = None
     remaining_seconds: Callable[[], float | None] | None = None
+    tool_result_filter: Callable[[ModuleInvocation, ModuleResult], ModuleResult] | None = None
 
     def emit(self, event: str, payload: dict[str, Any]) -> None:
         if self.trace:
@@ -210,11 +211,19 @@ class ToolFacade:
         payload.pop("mcp_metadata", None)
         if payload.get("success") is not True:
             err = payload.get("error") or {}
-            return ModuleResult.fail(str(err.get("code") or "TOOL_ERROR"), str(err.get("message") or "工具调用失败"), extensions={"raw": payload})
+            failed = ModuleResult.fail(str(err.get("code") or "TOOL_ERROR"), str(err.get("message") or "工具调用失败"), extensions={"raw": payload})
+            return self.d.tool_result_filter(inv, failed) if self.d.tool_result_filter else failed
+        projected = ModuleResult.ok(payload.get("data"), artifacts=tuple(payload.get("artifacts") or ()))
+        if self.d.tool_result_filter:
+            projected = self.d.tool_result_filter(inv, projected)
+            # Transformed platform results must not embed the original bearer URL
+            # in a tool-authored app descriptor or its initial_result.
+            if projected.data != payload.get("data") or not projected.success:
+                app_descriptor = None
         if isinstance(app_descriptor, dict):
             app_descriptor["initial_result"] = payload.get("data")
             self.d.emit("harness_mcp_app_view", {"tool_name": row.name, "mcp_app": app_descriptor})
-        return ModuleResult.ok(payload.get("data"), artifacts=tuple(payload.get("artifacts") or ()))
+        return projected
 
 
 class SandboxFacade:

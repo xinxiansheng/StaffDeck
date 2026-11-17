@@ -5,7 +5,7 @@ Each test here pins one behaviour the review found missing:
 1. The PEP is a *host* obligation — a provider that never calls ``guard.require`` still cannot
    bypass the policy (``CapabilityHost._pep`` runs before ``_dispatch``).
 2. ``pre_tool`` / ``post_tool`` hooks actually run around every capability call, and a
-   ``deny`` from ``pre_tool`` refuses the call before the ledger records anything.
+   ``deny`` from ``pre_tool`` refuses execution and records a denied attempt.
 3. ``finish_task`` closes the slot: the *next* tool call in the same turn is fenced.
 4. Provider pinning: a grant's ``provider_module_id`` is honoured and a pinned-but-missing
    provider fails closed rather than falling through to the first enabled module.
@@ -332,7 +332,7 @@ def test_host_pep_fails_closed_for_unmapped_operation(db, monkeypatch):
 
 # --------------------------------------------------------------------------- 2. pre_tool / post_tool hooks
 
-def test_pre_tool_deny_refuses_call_before_ledger(db, monkeypatch):
+def test_pre_tool_deny_records_audit_without_side_effect_claim(db, monkeypatch):
     tool = _tool(db, "tool_c")
     ensure_private_resource_binding(db, "t1", "a1", "tool", tool.id)
     db.commit()
@@ -351,7 +351,8 @@ def test_pre_tool_deny_refuses_call_before_ledger(db, monkeypatch):
     inv = ModuleInvocation(invocation_id="i4", module_id="tool", operation="tool.invoke/v1", arguments={"tool_id": tool.id}, context=_ctx(), binding_id=tool.id, side_effecting=True)
     res, receipt = host.invoke(inv)
     assert res.success is False and res.error["code"] == "PRE_TOOL_DENIED"
-    assert receipt is None, "a refused call must not create a ledger row"
+    assert receipt.status == "denied" and receipt.side_effect_key is None
+    assert host.results[-1]["error"]["code"] == "PRE_TOOL_DENIED"
     assert provider.calls == []
     assert seen == [("pre_tool", "tool.invoke/v1")], "post_tool must not run for a refused call"
 
@@ -382,6 +383,26 @@ def test_post_tool_runs_and_can_replace_result(db, monkeypatch):
 
 # --------------------------------------------------------------------------- 3. finish_task closes the slot
 
+@pytest.mark.parametrize("platform,code,message,expected", [
+    (True, "MCP_NOT_EXECUTED", "structured rejection", "PLATFORM_GATEWAY_REJECTED"),
+    (False, "MCP_NOT_EXECUTED", "structured rejection", "MCP_NOT_EXECUTED"),
+    (True, "MCP_ERROR", "调用被拒绝：参数或权限不符合本次运行。", "MCP_ERROR"),
+    (False, "MCP_ERROR", "调用被拒绝：参数或权限不符合本次运行。", "MCP_ERROR"),
+    (True, "MCP_ERROR", "调用被拒绝：参数或权限不符合本次运行。 timeout", "MCP_ERROR"),
+    (True, "MCP_ERROR", "gateway timeout", "MCP_ERROR"),
+    (True, "MCP_EXECUTION_ERROR", "调用被拒绝：参数或权限不符合本次运行。", "MCP_EXECUTION_ERROR"),
+])
+def test_only_structured_platform_gateway_rejection_is_known_not_executed(db, platform, code, message, expected):
+    snap = CompositionCompiler(hooks=()).compile(_staff())
+    if platform:
+        snap = replace(snap, session_policy={**snap.session_policy, "platform_gateway_server": "platform_employee1"})
+    host = _host(db, snap)
+    inv = ModuleInvocation("rejection", "tool", "tool.invoke/v1", {}, _ctx(), binding_id="write")
+    result = host._filter_tool_result(inv, ModuleResult.fail(code, message))
+    assert result.error["code"] == expected
+    if expected == "PLATFORM_GATEWAY_REJECTED":
+        assert result.error["executed"] is False
+
 def test_finish_task_closes_slot_and_fences_next_call(db, monkeypatch):
     tool = _tool(db, "tool_e")
     ensure_private_resource_binding(db, "t1", "a1", "tool", tool.id)
@@ -400,7 +421,7 @@ def test_finish_task_closes_slot_and_fences_next_call(db, monkeypatch):
     assert host.slot.closed is True
     later, receipt = host.invoke_proxy("tool_invoke", {"tool_id": tool.id, "arguments": {}}, _ctx(trace_id="hcall_late"))
     assert later.success is False and later.error["code"] == "ACTIVATION_FENCED"
-    assert receipt is None
+    assert receipt.status == "denied" and receipt.side_effect_key is None
     assert provider.calls == [], "no capability may run after finish_task"
 
 

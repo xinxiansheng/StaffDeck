@@ -44,6 +44,7 @@ NOT_SENT_CODES = frozenset(
         "UNSUPPORTED_CAPABILITY", "PROVIDER_INVALID", "PROVIDER_UNAUTHORIZED", "ENGINE_UNAVAILABLE",
         "PROVIDER_UNAVAILABLE", "PROVIDER_VERSION_CHANGED", "PROVIDER_CONFLICT",
         "SOURCE_UNAVAILABLE", "RESOURCE_UNAVAILABLE", "RESOURCE_CONTRACT_INVALID",
+        "PLATFORM_GATEWAY_REJECTED",
     }
 )
 
@@ -219,12 +220,17 @@ class InvocationLedger:
         row = entry.row
         row.status = "denied"
         row.logical_action_key = None
-        row.result_json = {"success": False, "error": dict(reason)}
+        row.result_json = _audit({"success": False, "error": dict(reason)})
         row.finished_at = utc_now()
         row.updated_at = utc_now()
         self.db.add(row)
         self.db.commit()
         return entry.receipt
+
+    def refuse(self, invocation: ModuleInvocation, reason: Mapping[str, Any]) -> Receipt:
+        """Audit a refused attempt without acquiring/releasing any write claim."""
+        from dataclasses import replace
+        return self.deny(self.start(replace(invocation, side_effecting=False)), reason)
 
     def cancel(self, entry: LedgerEntry) -> Receipt:
         row = entry.row
