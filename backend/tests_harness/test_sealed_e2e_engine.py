@@ -187,7 +187,7 @@ def test_unknown_engine_tools_are_visible_and_stop_after_three_attempts(db, fake
     def reply(body):
         if not body.get('tools'):
             return original(body)
-        attempted.append(True)
+        attempted.append(body)
         return [_chunk('unknown', {'tool_calls': [{'index': 0, 'id': f'unknown-{len(attempted)}',
             'type': 'function', 'function': {'name': 'nonexistent_function', 'arguments': '{}'}}]}),
             _chunk('unknown', {}, 'tool_calls')]
@@ -198,8 +198,14 @@ def test_unknown_engine_tools_are_visible_and_stop_after_three_attempts(db, fake
     rows = db.exec(select(AgentEvent).where(AgentEvent.session_id == response.session_id)).all()
     frames = [row.payload_json for row in rows if row.event_type == 'task_frame_finished']
     failures = [row.payload_json for row in rows if row.event_type == 'harness_tool_result']
-    assert len(attempted) == 3
+    # Three unknown-tool calls are executed and refused; CapabilityRecovery then stops the frame.
     assert len(failures) == 3 and all(row['error']['code'] == 'UNKNOWN_TOOL' for row in failures)
+    # The engine's repeat-tool reminder may ask the model once more after the third identical call.
+    # That reply is never executed (failures and action_count stay at 3); any other extra request is a bug.
+    assert len(attempted) in (3, 4)
+    if len(attempted) == 4:
+        last = (attempted[-1].get('messages') or [])[-1]
+        assert last.get('role') == 'user' and 'repeating the exact same tool call' in str(last.get('content'))
     assert frames[-1]['action_count'] == 3
     assert frames[-1]['status'] != 'completed'
 
