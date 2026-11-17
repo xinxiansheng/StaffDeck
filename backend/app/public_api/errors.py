@@ -25,6 +25,18 @@ class PublicAPIError(Exception):
         self.headers = headers or {}
 
 
+class RunExecutionFailure(PublicAPIError):
+    """A completed runtime failure with its user reply, not a broken stream."""
+
+    def __init__(self, code: str, reply: str, *, causes: list[dict[str, Any]] | None = None):
+        deterministic = code in {"NOT_ALLOWED", "HANDOFF_NOT_ALLOWED", "PERMISSION_DENIED",
+            "TASK_EXECUTION_FAILED", "PLATFORM_GATEWAY_REJECTED", "REQUIRED_CAPABILITY_MISSING",
+            "PRE_TOOL_DENIED", "ACTIVATION_FENCED"} or "UNKNOWN" in code
+        super().__init__(409 if deterministic else 502, code, reply)
+        self.reply = reply
+        self.causes = causes or [{"code": code, "message": reply[:2000]}]
+
+
 def problem_response(
     request: Request,
     *,

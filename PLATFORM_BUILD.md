@@ -1,6 +1,19 @@
 # 平台构建与增量说明
 
-## 最新：委托运行原件导入与拒绝审计（2026-11-17）
+## 最新：SOP 失败状态与真实错误回传（2026-11-17）
+
+基于 `7dc871b3`，继续保留原件导入、拒绝审计和 member 网关授权修复。本次只改 StaffDeck 运行处理；不改测试服工具白名单、SOP 路由、模型或数据库结构。
+
+- 模型提交 `submit_step_result status=failed` 时，保留本步失败及实际工具错误；不因前一步已经完成而改成 `action_budget` 或复用前一步过渡回复。没有工具错误时使用 `TASK_EXECUTION_FAILED`。
+- 不允许的转人工继续拒绝为 `HANDOFF_NOT_ALLOWED`。`harness_turns`、任务帧、逻辑 AgentLoop 与 Public API job 均记录失败；保留本步生成的回复。
+- Public API 在失败流没有 `complete` 事件时，只读取同租户、同会话、同 job 的持久化终态回执。`error_json` / 运行详情的 `error` 带 `code`、`message`、`reply`、`causes`；转人工被拒时可同时查到先前工具的 `NOT_ALLOWED`。确定性拒绝不可重试；同一回合重放不会重复执行。
+- 回归中修复上一增量引入的参数修正问题：存在审计回执时，仅 `denied`、明确 `executed=false` 且没有写声明的参数错误允许修正。已执行或结果不确定的写调用不能据此重试。
+
+旧基线两条真实 Public API → member → SOP → Node 引擎用例均复现失败；修复后统一本机验收 **646 项 StaffDeck + 1 项 Java → StaffDeck HTTP** 通过，零失败 / 错误 / 跳过。模型决策为脚本数据；没有调用线上法务服务或验证真实 Word 文件。目标 Linux 镜像及测试服需构建后复测。
+
+失败运行请读取 `GET /runs/{run_id}` 的 `error.reply` 和 `error.causes`，或 `run.failed` 事件中的同名字段；`/runs/{run_id}/result` 对失败运行仍返回 409。现存失败记录不自动回填，应用于升级后新运行。复用 `Dockerfile.platform`，无需新增配置或迁移；本次运行状态修复可独立更新 StaffDeck。两仓库提交及复测步骤见平台交接 `docs/features/PRD-007/F-I3/sop-run-status-fix.md`。
+
+## 前一增量：委托运行原件导入与拒绝审计（2026-11-17）
 
 基于 `289126c3`。委托沙箱继续 `network_mode=deny`、`allowed_domains=[]`。已授权的 `workbench_file_original` 返回一次性链接后，由 StaffDeck 服务端按部署配置下载，核对大小和 SHA-256，放入当前任务的 `attachments/originals/`，返回 `workspace_path`。不依赖 curl、Perl 模块、shell 变量或重定向，不修改 SRT 策略。
 

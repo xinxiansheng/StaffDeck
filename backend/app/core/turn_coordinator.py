@@ -875,8 +875,10 @@ class TurnCoordinator:
         self._renew_session_lease()
         reply, citations = compact_knowledge_citation_labels(reply, citations)
         reply = self.supervise_reply(request, session, reply, response_skill, last_step_result)
-        execution_error = next((r.error for r in execution_results
-            if r.status in {"failed", "action_budget"} and isinstance(r.error, dict) and r.error.get("code")), None)
+        execution_error = next((r.error if isinstance(r.error, dict) and r.error.get("code")
+            else {"code": "TASK_EXECUTION_FAILED", "message": r.reply_fragment or "本步骤执行失败，尚未完成。"}
+            for r in execution_results if r.status == "failed" or
+            (r.status == "action_budget" and isinstance(r.error, dict) and r.error.get("code"))), None)
         runtime_error_code = str(execution_error["code"]) if execution_error else None
         if execution_error:
             reply += f"\n\n本次执行未完成（{runtime_error_code}）：{execution_error.get('message') or '请查看执行记录'}"
@@ -1604,14 +1606,16 @@ def _defer_failed_step_after_completed_checkpoint(
     """Keep a committed SOP result when immediate continuation fails.
 
     SOP TaskFrames may advance through several nodes in one request.  Once a
-    node has completed, its transition and slots are already durable.  A model
-    or protocol failure while starting the following node must therefore not
+    node has completed, its transition and slots are already durable.  An invalid
+    model action envelope while starting the following node must therefore not
     erase a user-visible result from the completed node.  Represent the
     unfinished continuation as ``action_budget`` so the frame remains queued
     and resumable at the already-persisted next step.
     """
 
-    if result.status != "failed":
+    # Only an invalid model envelope is resumable here. A valid failed
+    # submission or a business/permission failure must keep its own outcome.
+    if not _is_recoverable_action_protocol_failure(result):
         return result
     checkpoint = next(
         (
@@ -1655,6 +1659,8 @@ def _combine_results(
         (item.reply_fragment.strip() for item in reversed(results) if item.reply_fragment.strip()),
         "",
     )
+    if last.status == "failed":
+        terminal_reply = last.reply_fragment.strip() or str((last.error or {}).get("message") or "本步骤执行失败，尚未完成。")
     return TaskExecutionResult(
         task_frame_id=task_frame_id,
         status=last.status,

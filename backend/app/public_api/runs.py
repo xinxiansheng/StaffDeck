@@ -25,7 +25,7 @@ from app.db.models import (
 )
 from app.harness import HarnessArtifactAccessError, normalize_harness_artifact_path, open_harness_artifact
 from app.public_api.auth import PublicPrincipal, enforce_agent_access, require_scopes
-from app.public_api.errors import PublicAPIError
+from app.public_api.errors import PublicAPIError, RunExecutionFailure
 from app.public_api.idempotency import replay_idempotent_response, store_idempotent_response
 from app.public_api.jobs import (
     create_job,
@@ -252,13 +252,30 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
                 from app.public_api.platform_subject import principal_for_job
                 principal_for_job(worker_db, worker_db.get(APIJob, job.id))
                 for item in AgentLoop(worker_db).handle_turn_stream(request):
+                    if item.get("event") == "error" and isinstance(item.get("data"), dict):
+                        worker_result["stream_error"] = item["data"]
                     if item.get("event") != "complete":
                         continue
                     data = item.get("data")
                     if isinstance(data, dict):
                         worker_result["response"] = ChatTurnResponse.model_validate(data)
                 if "response" not in worker_result:
-                    raise RuntimeError("Harness stream ended without a complete response")
+                    # Failed turns intentionally emit `error` instead of `complete`.
+                    # Recover only this job's durable terminal response; never the
+                    # latest message/session response, which may belong to another run.
+                    terminal = worker_db.exec(select(HarnessTurnRecord).where(
+                        HarnessTurnRecord.tenant_id == job.tenant_id,
+                        HarnessTurnRecord.session_id == session_id,
+                        HarnessTurnRecord.client_turn_id == job.id,
+                    )).first()
+                    if terminal and terminal.status in {"completed", "failed"} and terminal.response_json:
+                        worker_result["response"] = ChatTurnResponse.model_validate(terminal.response_json)
+                    elif worker_result.get("stream_error"):
+                        error = worker_result["stream_error"]
+                        raise RunExecutionFailure(str(error.get("code") or "HARNESS_RUNTIME_ERROR"),
+                                                  str(error.get("message") or "本次运行失败。"))
+                    else:
+                        raise RuntimeError("Harness stream ended without a complete response")
         except Exception as exc:  # noqa: BLE001 - re-raised at persistent job boundary.
             worker_result["error"] = exc
         finally:
@@ -284,9 +301,6 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
     if "error" in worker_result:
         raise worker_result["error"]
     result = ChatTurnResponse.model_validate(worker_result.get("response"))
-    if result.runtime_error_code:
-        status = 409 if "UNKNOWN" in result.runtime_error_code else 502
-        raise PublicAPIError(status, result.runtime_error_code, result.reply)
     response_json = result.model_dump(mode="json")
     state = dict(response_json.get("session_state") or {})
     turn = db.exec(
@@ -315,6 +329,16 @@ def execute_run(db: Session, job: APIJob) -> dict[str, Any]:
         )
         .order_by(HarnessInvocationRecord.created_at)
     ).all() if frames else []
+    if result.runtime_error_code:
+        causes = [{"code": result.runtime_error_code, "message": result.reply[:2000]}]
+        seen_codes = {result.runtime_error_code}
+        for error in [*(frame.error_json for frame in frames),
+                      *((invocation.result_json or {}).get("error") for invocation in invocations)]:
+            if not isinstance(error, dict) or not error.get("code") or error["code"] in seen_codes:
+                continue
+            seen_codes.add(error["code"])
+            causes.append({"code": str(error["code"]), "message": str(error.get("message") or "")[:2000]})
+        raise RunExecutionFailure(result.runtime_error_code, result.reply, causes=_redact(causes[:20]))
     assistants = db.exec(
         select(Message)
         .where(

@@ -85,6 +85,26 @@ def test_harness_turn_receipt_blocks_in_progress_and_mismatched_reuse() -> None:
             raise AssertionError("mismatched client_turn_id reuse was not blocked")
 
 
+def test_failed_terminal_response_is_cached_without_reexecuting_the_turn() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        session = ChatSession(id="session-1", tenant_id="tenant-demo")
+        db.add(session)
+        db.commit()
+        store = HarnessTurnStore(db)
+        claim = store.claim(session, _request())
+        store.begin_completion(claim.record)
+        response = ChatTurnResponse(reply="当前步骤不允许转人工，未完成修订稿。", session_id=session.id,
+            runtime_error_code="HANDOFF_NOT_ALLOWED",
+            session_state=SessionPublic(session_id=session.id, tenant_id=session.tenant_id))
+        store.complete(claim.record, response)
+        assert claim.record.status == "failed"
+        assert claim.record.error_json["code"] == "HANDOFF_NOT_ALLOWED"
+        assert claim.record.error_json["reply"] == response.reply
+        assert store.claim(session, _request()).replay == response
+        assert store.cancel(claim.record) is False
+
+
 def test_harness_turn_terminal_receipt_allows_only_cancel_or_completion() -> None:
     engine = _engine()
     with Session(engine) as db:

@@ -5,6 +5,49 @@ from tests_harness.test_capability_host_hardening import db as db, _host, _staff
 import pytest
 
 
+@pytest.mark.parametrize("error", [None, {"code": "NOT_ALLOWED", "message": "当前技能不允许调用该工具。"}])
+def test_explicit_failure_keeps_current_result_instead_of_a_previous_transition(error):
+    from app.core.harness_agent import HarnessAction, finish_execution_result
+    from app.core.task_request_compiler import TaskExecutionResult
+    from app.core.turn_coordinator import (
+        _combine_results,
+        _defer_failed_step_after_completed_checkpoint,
+    )
+    req = TaskRequirement(task_frame_id="tf", kind="sop", goal="generate revision")
+    capabilities = [{"tool_name": "word_revision_create", "success": False, "error": error}] if error else []
+    result = finish_execution_result(req, HarnessAction(action="finish", status="failed",
+        reply_fragment="本步骤未生成修订稿。"), [], [], capabilities, [], action_count=1)
+    expected = error["code"] if error else "TASK_EXECUTION_FAILED"
+    assert result.error["code"] == expected
+    previous = TaskExecutionResult(task_frame_id="tf", status="completed", reply_fragment="进入 Word 生成。")
+    assert _defer_failed_step_after_completed_checkpoint(result, [previous]) is result
+    combined = _combine_results("tf", [previous, result])
+    assert combined.status == "failed" and combined.reply_fragment == result.reply_fragment
+    result.reply_fragment = ""
+    assert "进入 Word" not in _combine_results("tf", [previous, result]).reply_fragment
+
+
+def test_a_handled_optional_tool_error_does_not_override_a_completed_submission():
+    from app.core.harness_agent import HarnessAction, finish_execution_result
+    req = TaskRequirement(task_frame_id="tf", kind="sop", goal="answer with permitted information")
+    result = finish_execution_result(req, HarnessAction(action="finish", status="completed",
+        reply_fragment="已用允许的信息完成答复。"), [], [], [
+        {"tool_name": "optional", "success": False, "error": {"code": "NOT_ALLOWED"}}], [], action_count=1)
+    assert result.status == "completed" and result.error is None
+
+
+@pytest.mark.parametrize("status,executed,key,repairable", [
+    ("denied", False, None, True), ("denied", None, None, False),
+    ("completed", False, "write-claim", False), ("outcome_unknown", False, "write-claim", False),
+])
+def test_argument_repair_requires_a_proven_preexecution_refusal(status, executed, key, repairable):
+    from staffdeck_harness.contracts.invocation import ModuleResult, Receipt
+    from staffdeck_harness.runtime.structured_output import repair_candidate
+    result = ModuleResult(success=False, error={"code": "INVALID_ARGUMENTS", "executed": executed})
+    receipt = Receipt(invocation_id="call", status=status, request_digest="digest", side_effect_key=key)
+    assert (repair_candidate(result, receipt, tool="tool_invoke") is not None) is repairable
+
+
 def test_conversation_cannot_submit_a_sop_result(db):
     cap = _host(db, CompositionCompiler(hooks=()).compile(_staff()))
     execution = ExecutionHost(

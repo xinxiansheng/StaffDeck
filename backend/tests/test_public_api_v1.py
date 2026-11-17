@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -283,6 +284,46 @@ def test_public_run_trace_maps_harness_actions_and_failures() -> None:
     assert _TRACE_EVENT_MAP["harness_action_created"] == "run.action.started"
     assert _TRACE_EVENT_MAP["harness_action_failed"] == "run.action.failed"
     assert _TRACE_EVENT_MAP["error_occurred"] == "run.failed"
+
+
+@pytest.mark.parametrize("mode", ["error_only", "missing_terminal", "durable_success"])
+def test_run_consumes_failure_events_and_only_its_own_terminal_receipt(monkeypatch, mode):
+    client, engine, admin_token = _client(monkeypatch)
+    key = _tenant_key(client, admin_token, ["runs:create", "runs:read"])
+    class FakeLoop:
+        def __init__(self, db):
+            self.db = db
+        def handle_turn_stream(self, request):
+            session = self.db.get(ChatSession, request.session_id)
+            own = mode == "durable_success"
+            reply = "THIS_RUN_SUCCESS" if own else "OTHER_RUN_PRIVATE_REPLY"
+            response = ChatTurnResponse(reply=reply, session_id=session.id, session_state=public_session(session))
+            self.db.add(HarnessTurnRecord(tenant_id=request.tenant_id, session_id=session.id,
+                client_turn_id=request.client_turn_id if own else "unrelated-turn", request_digest="fixture",
+                status="completed", lease_owner="synthetic-lease", lease_expires_at=utc_now() + timedelta(minutes=1),
+                response_json=response.model_dump(mode="json")))
+            self.db.commit()
+            if mode == "error_only":
+                yield {"event": "error", "data": {"code": "NOT_ALLOWED", "message": "本步工具被拒，未生成文件。"}}
+    monkeypatch.setattr("app.public_api.runs.AgentLoop", FakeLoop)
+    monkeypatch.setattr("app.public_api.jobs.engine", engine)
+    response = client.post("/agents/agent_api/runs", headers={"Authorization": "Bearer " + key}, json={"input": "test"})
+    assert response.status_code == 202
+    run_job(response.json()["id"])
+    with Session(engine) as db:
+        job = db.get(APIJob, response.json()["id"])
+        assert "OTHER_RUN_PRIVATE_REPLY" not in str(job.result_json) + str(job.error_json)
+        if mode == "durable_success":
+            assert job.status == "succeeded" and job.result_json["reply"] == "THIS_RUN_SUCCESS"
+        else:
+            assert job.status == "failed"
+            if mode == "error_only":
+                assert job.error_json["code"] == "NOT_ALLOWED"
+                assert job.error_json["reply"] == "本步工具被拒，未生成文件。"
+                assert not job.retryable
+            else:
+                assert job.error_json["code"] == "JOB_EXECUTION_FAILED"
+                assert "without a complete response" in job.error_json["message"]
 
 
 def test_successful_job_clears_stale_restart_error(monkeypatch) -> None:

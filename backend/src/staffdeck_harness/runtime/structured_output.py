@@ -101,6 +101,11 @@ def validate_result(value, schema):
 
 
 def repair_candidate(result, receipt, *, tool, current=None, context=None):
-    if (result.error or {}).get('code') == 'INVALID_ARGUMENTS' and receipt is None:
+    error = result.error or {}
+    # Preflight validation now has an audit receipt. It is still safe to repair
+    # before execution; a sent/unknown write must never become an automatic retry.
+    refused_before_execution = (receipt is not None and receipt.status == 'denied'
+        and receipt.side_effect_key is None and error.get('executed') is False)
+    if error.get('code') == 'INVALID_ARGUMENTS' and (receipt is None or refused_before_execution):
         return {'tool':tool, 'error':dict(result.error), **(context or {})}
     return None if current and current.get('tool') == tool else current

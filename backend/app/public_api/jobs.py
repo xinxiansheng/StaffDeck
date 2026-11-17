@@ -25,7 +25,7 @@ from app.db.models import (
     utc_now,
 )
 from app.public_api.auth import PublicPrincipal, get_public_principal
-from app.public_api.errors import PublicAPIError
+from app.public_api.errors import PublicAPIError, RunExecutionFailure
 from app.public_api.schemas import JobRead
 from app.public_api.runtime import enqueue, maintenance_sessions
 from staffdeck_harness.runtime.services import runtime_services
@@ -487,6 +487,8 @@ def run_job(job_id: str, *, data_services=None) -> None:
             if isinstance(exc, PublicAPIError):
                 code = exc.code
             error = {"code": code, "message": str(exc)[:2000]}
+            if isinstance(exc, RunExecutionFailure):
+                error.update(reply=exc.reply, causes=exc.causes)
             terminal = _terminalize_job(
                 db,
                 job,

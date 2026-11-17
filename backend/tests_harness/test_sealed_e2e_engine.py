@@ -555,7 +555,10 @@ def test_real_engine_interrupts_unavailable_capability_loop_and_keeps_checkpoint
     assert "暂停自动重试" in response.reply
     assert response.runtime_error_code is None
     assert len(model.requests) <= 5, "do not burn 32 model calls on an unavailable operation"
-    assert not db.exec(select(HarnessInvocationRecord)).all(), "no external business action was executed"
+    attempts = db.exec(select(HarnessInvocationRecord)).all()
+    assert len(attempts) == 3
+    assert all(row.status == "denied" and row.logical_action_key is None
+               and row.result_json["error"]["executed"] is False for row in attempts), "only preflight refusals, no business execution"
     loops = db.exec(select(HarnessAgentLoopRecord)).all()
     assert loops and any(row.checkpoint_json for row in loops)
 

@@ -812,6 +812,15 @@ def _finish_result(
     # durable handoff state instead of telling the user that routing is unavailable.
     if step_type == "handoff" and next_step_id is None:
         status = "handoff"
+    error = None
+    if status == "failed":
+        # A submitted business failure is terminal, not an empty/invalid model
+        # envelope. Preserve the actual failed capability when one explains it.
+        error = next((dict(item["error"]) for item in reversed(capability_results)
+                      if not item.get("success") and isinstance(item.get("error"), dict)
+                      and item["error"].get("code")), None)
+        error = error or {"code": "TASK_EXECUTION_FAILED",
+                          "message": action.reply_fragment.strip() or "本步骤执行失败，尚未完成。"}
     return TaskExecutionResult(
         task_frame_id=requirement.task_frame_id,
         status=status,
@@ -825,6 +834,7 @@ def _finish_result(
         task_summary=action.task_summary.strip(),
         action_count=action_count,
         structured_result=action.structured_result,
+        error=error,
     )
 
 

@@ -121,8 +121,11 @@ class HarnessTurnStore:
             # ``finalizing`` first.
             expected_statuses=("started", "finalizing"),
             values={
-                "status": "completed",
+                "status": "failed" if response.runtime_error_code else "completed",
                 "response_json": response.model_dump(mode="json"),
+                "error_json": ({"code": response.runtime_error_code,
+                                "message": response.reply[:2000], "reply": response.reply}
+                               if response.runtime_error_code else {}),
                 "finished_at": now,
                 "updated_at": now,
             },
@@ -208,7 +211,7 @@ class HarnessTurnStore:
             raise HarnessTurnConflict(
                 "同一个 client_turn_id 不能用于不同的 Harness 请求。"
             )
-        if existing.status == "completed" and existing.response_json:
+        if existing.status in {"completed", "failed"} and existing.response_json:
             return HarnessTurnClaim(
                 record=existing,
                 replay=ChatTurnResponse.model_validate(existing.response_json),
