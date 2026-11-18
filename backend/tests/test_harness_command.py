@@ -712,6 +712,18 @@ def test_windows_broker_environment_keeps_system_paths_without_secrets(
     assert "OPENAI_API_KEY" not in result
 
 
+def test_posix_managed_environment_keeps_usr_local_tools_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(command_module.sys, "platform", "linux")
+
+    result = command_module._managed_process_environment({"OPENAI_API_KEY": "must-not-leak"})
+
+    assert result["PATH"].split(":")[:2] == ["/usr/local/sbin", "/usr/local/bin"]
+    assert result["PATH"] == command_module._SANDBOX_PATH
+    assert "OPENAI_API_KEY" not in result
+
+
 def test_sandboxed_process_maps_structured_paths_and_cwd_for_bubblewrap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

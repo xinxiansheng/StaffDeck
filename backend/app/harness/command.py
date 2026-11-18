@@ -274,7 +274,10 @@ def register_command_tools(registry: HarnessRegistry) -> HarnessRegistry:
             "configured network policy. On Windows do not use Bash syntax (heredoc, "
             "python3, py -3, or bash chaining); use PowerShell statements. In a "
             "packaged Windows build, python/python3 resolve to the bundled runtime; "
-            "in source deployments, use the General Skill Python runtime. Relative "
+            "in source deployments, use the General Skill Python runtime. On Linux and "
+            "macOS, heredocs (<<), $ expansion and backticks are rejected: write the "
+            "script with write_file first, then run it (for example python3 make.py). "
+            "Relative "
             "paths start in the TaskFrame workspace; absolute paths are accepted and "
             "remain subject to OS permissions and the configured sandbox policy."
         ),
@@ -828,8 +831,10 @@ def _managed_process_environment(env: dict[str, str] | None) -> dict[str, str]:
         }
         baseline = {key: os.environ[key] for key in system_keys if key in os.environ}
     else:
+        # Same PATH as the Bubblewrap backend: SRT inherits this environment, and
+        # images that install Python/Node under /usr/local must stay reachable.
         baseline = {
-            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH": _SANDBOX_PATH,
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
         }
